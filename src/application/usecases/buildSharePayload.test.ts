@@ -6,7 +6,7 @@ describe('buildSharePayload', () => {
   it('compose le payload de partage', () => {
     const payload = buildSharePayload(FEATURED_TRACK, 'https://example.com')
 
-    expect(payload.title).toBe('Noty - Double Face.exe')
+    expect(payload.title).toBe('Noty - Grand Frere Faux')
     expect(payload.text).toContain('Noty x Nyto')
     expect(payload.url).toBe('https://example.com')
   })

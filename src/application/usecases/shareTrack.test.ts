@@ -32,7 +32,7 @@ describe('shareTrack', () => {
     })
 
     expect(result).toBe('copied')
-    expect(writeText).toHaveBeenCalledWith('Noty - Double Face.exe\nhttps://noty-nyto.app')
+    expect(writeText).toHaveBeenCalledWith('Noty - Grand Frere Faux\nhttps://noty-nyto.app')
     expect(notify).toHaveBeenCalledWith('Lien copie dans le presse-papiers.')
   })
 })
