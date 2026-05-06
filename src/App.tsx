@@ -250,6 +250,58 @@ function App() {
     setSpectrum((previous) => previous.map(() => 0.08))
   }
 
+  const currentTrackIndex = getCurrentTrackIndex()
+  const upcomingTracks = Array.from({ length: Math.min(3, TOP_TRACKS.length - 1) }, (_, offset) => {
+    const index = (currentTrackIndex + offset + 1) % TOP_TRACKS.length
+    return TOP_TRACKS[index]
+  })
+
+  /* c8 ignore start -- API lockscreen non supportee en environnement de test */
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return
+    const audio = audioRef.current
+    if (!audio) return
+    const coverArtwork = activeTrack.coverUrl ?? VISUALS.trackCover
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: activeTrack.title,
+      artist: activeTrack.artist,
+      album: 'Noty x Nyto',
+      artwork: [{ src: coverArtwork, sizes: '512x512', type: 'image/jpeg' }],
+    })
+
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+
+    navigator.mediaSession.setActionHandler('play', () => {
+      void audio.play()
+    })
+    navigator.mediaSession.setActionHandler('pause', () => {
+      audio.pause()
+    })
+    navigator.mediaSession.setActionHandler('previoustrack', () => {
+      setTrackByIndex(currentTrackIndex - 1, true)
+    })
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+      setTrackByIndex(currentTrackIndex + 1, true)
+    })
+    navigator.mediaSession.setActionHandler('seekto', (details) => {
+      if (typeof details.seekTime === 'number') {
+        const boundedSeek = Math.min(Math.max(details.seekTime, 0), duration || 0)
+        audio.currentTime = boundedSeek
+        setCurrentTime(boundedSeek)
+      }
+    })
+
+    if ('setPositionState' in navigator.mediaSession && duration > 0) {
+      navigator.mediaSession.setPositionState({
+        duration,
+        playbackRate: audio.playbackRate || 1,
+        position: Math.min(currentTime, duration),
+      })
+    }
+  }, [activeTrack, currentTrackIndex, isPlaying, currentTime, duration])
+  /* c8 ignore end */
+
   const downloadName = `${activeTrack.title.replace(/[^\w.-]+/g, '_')}.mp3`
 
   return (
@@ -321,6 +373,14 @@ function App() {
             <h2>{activeTrack.title}</h2>
             <p>{activeTrack.artist}</p>
             <p className="genre">{activeTrack.genre}</p>
+            <div className="meta__status">
+              <span className={`status-pill ${isPlaying ? 'status-pill--playing' : ''}`}>
+                {isPlaying ? 'En lecture' : 'En pause'}
+              </span>
+              <span className="meta__time">
+                {formatTime(currentTime)} / {formatTime(duration)}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -441,6 +501,24 @@ function App() {
             </button>
           )}
         </div>
+
+        <section className="up-next" aria-label="File d attente">
+          <h3 className="up-next__title">A suivre</h3>
+          <div className="up-next__list">
+            {upcomingTracks.map((track) => (
+              <button
+                key={`up-next-${track.id}`}
+                type="button"
+                className="up-next__item"
+                aria-label={`Lire ensuite ${track.title}`}
+                onClick={() => setTrackByIndex(TOP_TRACKS.findIndex((item) => item.id === track.id), true)}
+              >
+                <span>{track.title}</span>
+                <small>{track.artist}</small>
+              </button>
+            ))}
+          </div>
+        </section>
 
         <button
           type="button"
@@ -619,6 +697,25 @@ function App() {
           </section>
         </div>
       )}
+
+      <aside className={`mini-player ${isPlaying ? 'mini-player--playing' : ''}`} aria-label="Mini lecteur mobile">
+        <img src={activeTrack.coverUrl} alt="" aria-hidden />
+        <div className="mini-player__meta">
+          <strong>{activeTrack.title}</strong>
+          <small>{activeTrack.artist}</small>
+        </div>
+        <div className="mini-player__actions">
+          <button type="button" aria-label="Mini piste precedente" onClick={() => goToPreviousTrack()}>
+            ◁
+          </button>
+          <button type="button" aria-label="Mini lecture pause" onClick={handlePlayPause}>
+            {isPlaying ? '❚❚' : '▷'}
+          </button>
+          <button type="button" aria-label="Mini piste suivante" onClick={() => goToNextTrack()}>
+            ▷
+          </button>
+        </div>
+      </aside>
     </main>
   )
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { FEATURED_TRACK, TOP_TRACKS } from './domain/entities/track'
@@ -283,8 +283,9 @@ describe('App', () => {
   it('navigue entre home songs gallery et change le son depuis la liste', async () => {
     render(<App />)
 
+    const homeSection = screen.getByRole('region', { name: 'Presentation musicale Noty et Nyto' })
     expect(screen.getByRole('heading', { name: 'Presentation musicale' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /VapeStore/i }))
+    fireEvent.click(within(homeSection).getByRole('button', { name: /VapeStore/i }))
     await waitFor(() => expect(window.location.hash).toBe('#/songs'))
     expect(screen.getByRole('heading', { name: 'Top 10 songs' })).toBeInTheDocument()
 
