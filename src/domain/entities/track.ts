@@ -16,7 +16,7 @@ export const FEATURED_TRACK: Track = {
  title: 'Grand Frere Faux',
  artist: 'Noty',
  genre: 'HyperPop / Cyberbung / Darkcore / French Core',
- audioUrl: '/tracks/Grand Frère Faux - Noty.mp3',
+ audioUrl: '/tracks/Grand Frère Faux - Noty.mp3',
  coverUrl: '/visual/bannerSuno.png',
  rank: 1,
  lyrics: `
