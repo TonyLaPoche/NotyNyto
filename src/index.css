@@ -53,8 +53,16 @@ body {
 .app {
   max-width: 920px;
   margin: 0 auto;
-  padding: 78px 18px 170px;
+  padding: 78px 18px 28px;
   position: relative;
+}
+
+.app--player-collapsed {
+  padding-bottom: 96px;
+}
+
+.app--player-expanded {
+  padding-bottom: 220px;
 }
 
 .atmosphere {
@@ -599,7 +607,8 @@ h1 {
   display: grid;
   grid-template-columns: 52px 1fr auto;
   grid-template-areas:
-    'cover meta controls'
+    'cover meta compact'
+    'controls controls controls'
     'seek seek seek'
     'extra extra extra'
     'lyrics lyrics lyrics';
@@ -611,17 +620,32 @@ h1 {
   backdrop-filter: blur(12px);
   padding: 10px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.player-bar--collapsed {
+  grid-template-areas: 'cover meta compact';
+  padding: 8px 10px;
 }
 
 .player-bar--playing {
   border-color: color-mix(in oklab, var(--accent) 45%, transparent);
 }
 
+.player-bar__progress {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
 .player-bar > img,
 .player-bar .cover--empty {
   grid-area: cover;
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
   border-radius: 10px;
   object-fit: cover;
 }
@@ -629,6 +653,13 @@ h1 {
 .player-bar__meta {
   grid-area: meta;
   min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
 }
 
 .player-bar__meta strong,
@@ -643,13 +674,21 @@ h1 {
   color: var(--muted);
 }
 
+.player-bar__compact-actions {
+  grid-area: compact;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
 .player-bar__controls {
   grid-area: controls;
   display: inline-flex;
   gap: 6px;
 }
 
-.player-bar__controls button {
+.player-bar__controls button,
+.player-bar__compact-actions button {
   width: 34px;
   height: 34px;
   border-radius: 10px;
@@ -663,6 +702,10 @@ h1 {
   width: 42px !important;
   border-color: color-mix(in oklab, var(--accent) 55%, transparent) !important;
   background: var(--accent-soft) !important;
+}
+
+.player-bar__toggle {
+  font-size: 12px;
 }
 
 .player-seek {
@@ -687,7 +730,7 @@ h1 {
 .player-bar__lyrics {
   grid-area: lyrics;
   margin: 0;
-  max-height: 140px;
+  max-height: 120px;
   overflow: auto;
   white-space: pre-wrap;
   font-family: 'IBM Plex Mono', monospace;
@@ -695,6 +738,10 @@ h1 {
   color: #d5deea;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+
+.player-bar--expanded .player-bar__compact-actions .player-bar__play {
+  display: none;
 }
 
 .audio-element {
@@ -712,7 +759,15 @@ code {
 
 @media (max-width: 720px) {
   .app {
-    padding: 70px 12px 210px;
+    padding: 70px 12px 28px;
+  }
+
+  .app--player-collapsed {
+    padding-bottom: 88px;
+  }
+
+  .app--player-expanded {
+    padding-bottom: 260px;
   }
 
   .search-bar,
@@ -729,14 +784,14 @@ code {
     width: auto;
   }
 
-  .player-bar {
-    grid-template-columns: 44px 1fr;
+  .player-bar--expanded {
+    grid-template-columns: 44px 1fr auto;
     grid-template-areas:
-      'cover meta'
-      'controls controls'
-      'seek seek'
-      'extra extra'
-      'lyrics lyrics';
+      'cover meta compact'
+      'controls controls controls'
+      'seek seek seek'
+      'extra extra extra'
+      'lyrics lyrics lyrics';
   }
 
   .player-bar__controls {

@@ -89,6 +89,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Lecture' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument())
 
+    fireEvent.click(screen.getByRole('button', { name: 'Agrandir le lecteur' }))
     fireEvent.click(screen.getByRole('button', { name: 'Lyrics' }))
     expect(screen.getByRole('button', { name: 'Masquer lyrics' })).toBeInTheDocument()
   })

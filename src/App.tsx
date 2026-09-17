@@ -79,6 +79,10 @@ function App() {
   const [cachedIds, setCachedIds] = useState<string[]>([])
   const [cacheBytes, setCacheBytes] = useState(0)
   const [isLyricsExpanded, setIsLyricsExpanded] = useState(false)
+  const [isPlayerExpanded, setIsPlayerExpanded] = useState(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+    return window.matchMedia('(min-width: 721px)').matches
+  })
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const [trackDownloadPercent, setTrackDownloadPercent] = useState<Record<string, number>>({})
   const [networkQuality, setNetworkQuality] = useState(() => readBrowserNetworkQuality())
@@ -592,8 +596,14 @@ function App() {
           ? activePlaylist?.name ?? 'Playlist'
           : activeCatalog?.artist.displayName ?? 'Artiste'
 
+  const playerLayoutClass = activeTrack
+    ? isPlayerExpanded
+      ? 'app--player-expanded'
+      : 'app--player-collapsed'
+    : ''
+
   return (
-    <main className={`app ${isPlaying ? 'app--playing' : ''}`} style={appStyle}>
+    <main className={`app ${isPlaying ? 'app--playing' : ''} ${playerLayoutClass}`} style={appStyle}>
       <div className="atmosphere" aria-hidden />
 
       <nav className="site-nav" aria-label="Navigation principale">
@@ -942,20 +952,36 @@ function App() {
       )}
 
       {activeTrack && (
-        <aside className={`player-bar ${isPlaying ? 'player-bar--playing' : ''}`} aria-label="Lecteur">
+        <aside
+          className={`player-bar ${isPlaying ? 'player-bar--playing' : ''} ${isPlayerExpanded ? 'player-bar--expanded' : 'player-bar--collapsed'}`}
+          aria-label="Lecteur"
+        >
+          <div
+            className="player-bar__progress"
+            aria-hidden
+            style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }}
+          />
           {activeTrack.coverUrl ? <img src={activeTrack.coverUrl} alt="" aria-hidden /> : <div className="cover--empty" />}
-          <div className="player-bar__meta">
-            <strong>{activeTrack.title}</strong>
-            <small>
-              {activeTrack.artist} · {formatTime(currentTime)} / {formatTime(duration)}
-              {cachedIds.includes(activeTrack.id) ? ' · local' : ''}
-              {shuffleEnabled ? ' · aleatoire' : ''}
-            </small>
-          </div>
-          <div className="player-bar__controls">
-            <button type="button" aria-label="Piste precedente" onClick={() => goToRelativeTrack(-1)}>
-              ◁
+          {isPlayerExpanded ? (
+            <div className="player-bar__meta">
+              <strong>{activeTrack.title}</strong>
+              <small>
+                {activeTrack.artist} · {formatTime(currentTime)} / {formatTime(duration)}
+                {cachedIds.includes(activeTrack.id) ? ' · local' : ''}
+                {shuffleEnabled ? ' · aleatoire' : ''}
+              </small>
+            </div>
+          ) : (
+            <button type="button" className="player-bar__meta" onClick={() => setIsPlayerExpanded(true)}>
+              <strong>{activeTrack.title}</strong>
+              <small>
+                {activeTrack.artist} · {formatTime(currentTime)} / {formatTime(duration)}
+                {cachedIds.includes(activeTrack.id) ? ' · local' : ''}
+                {shuffleEnabled ? ' · aleatoire' : ''}
+              </small>
             </button>
+          )}
+          <div className="player-bar__compact-actions">
             <button
               type="button"
               className="player-bar__play"
@@ -964,64 +990,95 @@ function App() {
             >
               {isPlaying ? '❚❚' : '▷'}
             </button>
-            <button type="button" aria-label="Piste suivante" onClick={() => goToRelativeTrack(1)}>
-              ▷
-            </button>
             <button
               type="button"
-              className={shuffleEnabled ? 'repeat-btn--active' : ''}
-              aria-label="Lecture aleatoire"
-              aria-pressed={shuffleEnabled}
-              onClick={() => setShuffleEnabled((value) => !value)}
+              className="player-bar__toggle"
+              aria-expanded={isPlayerExpanded}
+              aria-label={isPlayerExpanded ? 'Reduire le lecteur' : 'Agrandir le lecteur'}
+              onClick={() => {
+                setIsPlayerExpanded((value) => {
+                  if (value) setIsLyricsExpanded(false)
+                  return !value
+                })
+              }}
             >
-              ↝
-            </button>
-            <button
-              type="button"
-              className={repeatMode !== 'off' ? 'repeat-btn--active' : ''}
-              aria-label="Mode repetition"
-              onClick={cycleRepeatMode}
-            >
-              {repeatMode === 'off' ? '1×' : repeatMode === 'all' ? '∞' : '1'}
+              {isPlayerExpanded ? '▼' : '▲'}
             </button>
           </div>
-          <input
-            className="player-seek"
-            type="range"
-            min={0}
-            max={duration || 1}
-            value={currentTime}
-            aria-label="Progression du morceau"
-            onChange={(event) => handleSeek(Number(event.target.value))}
-          />
-          <div className="player-bar__extra">
-            <label className="volume-inline">
-              <span className="sr-only">Volume</span>
+          {isPlayerExpanded && (
+            <>
+              <div className="player-bar__controls">
+                <button type="button" aria-label="Piste precedente" onClick={() => goToRelativeTrack(-1)}>
+                  ◁
+                </button>
+                <button
+                  type="button"
+                  className="player-bar__play"
+                  aria-label={isPlaying ? 'Pause' : 'Lecture'}
+                  onClick={() => void handlePlayPause()}
+                >
+                  {isPlaying ? '❚❚' : '▷'}
+                </button>
+                <button type="button" aria-label="Piste suivante" onClick={() => goToRelativeTrack(1)}>
+                  ▷
+                </button>
+                <button
+                  type="button"
+                  className={shuffleEnabled ? 'repeat-btn--active' : ''}
+                  aria-label="Lecture aleatoire"
+                  aria-pressed={shuffleEnabled}
+                  onClick={() => setShuffleEnabled((value) => !value)}
+                >
+                  ↝
+                </button>
+                <button
+                  type="button"
+                  className={repeatMode !== 'off' ? 'repeat-btn--active' : ''}
+                  aria-label="Mode repetition"
+                  onClick={cycleRepeatMode}
+                >
+                  {repeatMode === 'off' ? '1×' : repeatMode === 'all' ? '∞' : '1'}
+                </button>
+              </div>
               <input
+                className="player-seek"
                 type="range"
                 min={0}
-                max={1}
-                step={0.01}
-                value={volume}
-                onChange={(event) => setVolume(Number(event.target.value))}
-                aria-label="Volume"
+                max={duration || 1}
+                value={currentTime}
+                aria-label="Progression du morceau"
+                onChange={(event) => handleSeek(Number(event.target.value))}
               />
-            </label>
-            <button type="button" className="btn" onClick={() => setPlaylistPickerTrack(activeTrack)}>
-              + Playlist
-            </button>
-            <button type="button" className="btn" onClick={() => void shareTrack(activeTrack)}>
-              Partager
-            </button>
-            <button type="button" className="btn" onClick={() => setIsLyricsExpanded((value) => !value)}>
-              {isLyricsExpanded ? 'Masquer lyrics' : 'Lyrics'}
-            </button>
-            <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
-              Suno
-            </a>
-          </div>
-          {isLyricsExpanded && (
-            <pre className="player-bar__lyrics">{activeTrack.lyrics || 'Lyrics indisponibles.'}</pre>
+              <div className="player-bar__extra">
+                <label className="volume-inline">
+                  <span className="sr-only">Volume</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={volume}
+                    onChange={(event) => setVolume(Number(event.target.value))}
+                    aria-label="Volume"
+                  />
+                </label>
+                <button type="button" className="btn" onClick={() => setPlaylistPickerTrack(activeTrack)}>
+                  + Playlist
+                </button>
+                <button type="button" className="btn" onClick={() => void shareTrack(activeTrack)}>
+                  Partager
+                </button>
+                <button type="button" className="btn" onClick={() => setIsLyricsExpanded((value) => !value)}>
+                  {isLyricsExpanded ? 'Masquer lyrics' : 'Lyrics'}
+                </button>
+                <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
+                  Suno
+                </a>
+              </div>
+              {isLyricsExpanded && (
+                <pre className="player-bar__lyrics">{activeTrack.lyrics || 'Lyrics indisponibles.'}</pre>
+              )}
+            </>
           )}
           <audio
             ref={audioRef}
