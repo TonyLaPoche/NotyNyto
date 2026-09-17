@@ -5,16 +5,18 @@ describe('fetchPublicArtistCatalog', () => {
   it('appelle le proxy et retourne le catalogue', async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        artist: {
-          handle: 'noty2686',
-          displayName: 'Noty',
-          avatarUrl: '',
-          description: '',
-          fetchedAt: '2026-01-01T00:00:00.000Z',
-        },
-        tracks: [],
-      }),
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          artist: {
+            handle: 'noty2686',
+            displayName: 'Noty',
+            avatarUrl: '',
+            description: '',
+            fetchedAt: '2026-01-01T00:00:00.000Z',
+          },
+          tracks: [],
+        }),
     })
 
     const catalog = await fetchPublicArtistCatalog('@noty2686', fetcher as unknown as typeof fetch)
@@ -29,7 +31,8 @@ describe('fetchPublicArtistCatalog', () => {
   it('remonte une erreur proxy', async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: false,
-      json: async () => ({ error: 'Artiste introuvable' }),
+      status: 404,
+      text: async () => JSON.stringify({ error: 'Artiste introuvable' }),
     })
     await expect(fetchPublicArtistCatalog('missingartist', fetcher as unknown as typeof fetch)).rejects.toThrow(
       'Artiste introuvable',
@@ -39,10 +42,22 @@ describe('fetchPublicArtistCatalog', () => {
   it('utilise un message generique si error absente', async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: false,
-      json: async () => ({}),
+      status: 500,
+      text: async () => JSON.stringify({}),
     })
     await expect(fetchPublicArtistCatalog('missingartist', fetcher as unknown as typeof fetch)).rejects.toThrow(
       'Echec du scan artiste',
+    )
+  })
+
+  it('gere une reponse non JSON', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => 'A server error has occurred',
+    })
+    await expect(fetchPublicArtistCatalog('noty2686', fetcher as unknown as typeof fetch)).rejects.toThrow(
+      /API indisponible/,
     )
   })
 })
