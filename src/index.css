@@ -752,6 +752,52 @@ h1 {
   pointer-events: none;
 }
 
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 22px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.btn .material-symbols-outlined {
+  font-size: 18px;
+  margin-right: 4px;
+}
+
+.volume-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.volume-inline .material-symbols-outlined {
+  font-size: 18px;
+  color: var(--muted);
+}
+
+.song-cache-btn .material-symbols-outlined {
+  font-size: 18px;
+}
+
+.player-bar__controls button .material-symbols-outlined,
+.player-bar__compact-actions button .material-symbols-outlined {
+  font-size: 22px;
+}
+
+.player-bar__play .material-symbols-outlined {
+  font-size: 26px;
+}
+
 code {
   font-family: 'IBM Plex Mono', monospace;
   color: var(--accent);

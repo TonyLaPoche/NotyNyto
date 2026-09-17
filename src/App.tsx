@@ -99,7 +99,8 @@ function App() {
   const installPromptRef = useRef<BeforeInstallPromptEvent | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const objectUrlRef = useRef<string | null>(null)
-  const shouldAutoplayRef = useRef(false)
+  const pendingAutoplayTrackIdRef = useRef<string | null>(null)
+  const playableTrackIdRef = useRef<string | null>(null)
 
   const activeTrack = playQueue.find((track) => track.id === activeTrackId) ?? playQueue[0] ?? null
   const currentTrackIndex = activeTrack ? playQueue.findIndex((track) => track.id === activeTrack.id) : -1
@@ -206,7 +207,8 @@ function App() {
 
     let cancelled = false
     void (async () => {
-      const nextUrl = await resolvePlayableUrl(activeTrack.id, activeTrack.audioUrl)
+      const trackId = activeTrack.id
+      const nextUrl = await resolvePlayableUrl(trackId, activeTrack.audioUrl)
       if (cancelled) {
         if (nextUrl.startsWith('blob:')) URL.revokeObjectURL(nextUrl)
         return
@@ -218,6 +220,7 @@ function App() {
       if (nextUrl.startsWith('blob:')) {
         objectUrlRef.current = nextUrl
       }
+      playableTrackIdRef.current = trackId
       setPlayableUrl(nextUrl)
       setCurrentTime(0)
       setDuration(activeTrack.duration || 0)
@@ -232,17 +235,38 @@ function App() {
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || !playableUrl) return
+
+    const trackId = playableTrackIdRef.current
     audio.load()
-    if (!shouldAutoplayRef.current) return
-    shouldAutoplayRef.current = false
-    void audio
-      .play()
-      .then(() => setIsPlaying(true))
-      .catch(() => {
-        setIsPlaying(false)
-        setError('Lecture bloquee par le navigateur. Reessaie via Lecture.')
-      })
-  }, [playableUrl, activeTrackId])
+
+    if (!trackId || pendingAutoplayTrackIdRef.current !== trackId) return
+    pendingAutoplayTrackIdRef.current = null
+
+    const startPlayback = () => {
+      void audio
+        .play()
+        .then(() => {
+          setIsPlaying(true)
+          setError(null)
+        })
+        .catch(() => {
+          setIsPlaying(false)
+          setError('Lecture bloquee par le navigateur. Reessaie via Lecture.')
+        })
+    }
+
+    if (audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      startPlayback()
+      return
+    }
+
+    const onCanPlay = () => {
+      audio.removeEventListener('canplay', onCanPlay)
+      startPlayback()
+    }
+    audio.addEventListener('canplay', onCanPlay)
+    return () => audio.removeEventListener('canplay', onCanPlay)
+  }, [playableUrl])
 
   /* c8 ignore start -- Media Session API absente en tests */
   useEffect(() => {
@@ -291,6 +315,23 @@ function App() {
     setCacheBytes(bytes)
   }
 
+  function requestAutoplay(trackId: string) {
+    pendingAutoplayTrackIdRef.current = trackId
+  }
+
+  async function playCurrentAudio() {
+    const audio = audioRef.current
+    if (!audio) return
+    try {
+      await audio.play()
+      setIsPlaying(true)
+      setError(null)
+    } catch {
+      setIsPlaying(false)
+      setError('Impossible de lancer la lecture. Reessaie.')
+    }
+  }
+
   function startQueue(tracks: Track[], track?: Track, autoplay = false, shuffled = shuffleEnabled) {
     if (!tracks.length) {
       setError('Aucune piste disponible pour cette lecture.')
@@ -299,10 +340,32 @@ function App() {
     const queue = shuffled ? shuffleTracks(tracks) : tracks
     const selected = track && queue.some((item) => item.id === track.id) ? track : queue[0]
     setPlayQueue(queue)
-    shouldAutoplayRef.current = autoplay
-    setActiveTrackId(selected.id)
     setIsLyricsExpanded(false)
     setError(null)
+
+    if (autoplay) requestAutoplay(selected.id)
+
+    if (selected.id === activeTrackId) {
+      if (autoplay) void playCurrentAudio()
+      return
+    }
+
+    setActiveTrackId(selected.id)
+  }
+
+  const selectTrack = (track: Track, queue: Track[], autoplay = true) => {
+    startQueue(queue, track, autoplay, false)
+  }
+
+  const goToRelativeTrack = (delta: number, autoplay = true) => {
+    if (!playQueue.length || currentTrackIndex < 0) return
+    const nextIndex = shuffleEnabled
+      ? pickNextShuffledIndex(playQueue.length, currentTrackIndex)
+      : (currentTrackIndex + delta + playQueue.length) % playQueue.length
+    const nextTrack = playQueue[nextIndex]
+    if (autoplay) requestAutoplay(nextTrack.id)
+    setActiveTrackId(nextTrack.id)
+    setIsLyricsExpanded(false)
   }
 
   async function handleScanArtist(rawInput: string) {
@@ -425,13 +488,7 @@ function App() {
       return
     }
     if (audio.paused) {
-      try {
-        await audio.play()
-        setIsPlaying(true)
-        setError(null)
-      } catch {
-        setError('Impossible de lancer la lecture. Reessaie.')
-      }
+      await playCurrentAudio()
       return
     }
     audio.pause()
@@ -444,25 +501,6 @@ function App() {
     const nextValue = Math.min(Math.max(value, 0), duration)
     audio.currentTime = nextValue
     setCurrentTime(nextValue)
-  }
-
-  const selectTrack = (track: Track, queue: Track[], autoplay = false) => {
-    startQueue(queue, track, autoplay, false)
-  }
-
-  const goToRelativeTrack = (delta: number, autoplay = isPlaying) => {
-    if (!playQueue.length || currentTrackIndex < 0) return
-    if (shuffleEnabled) {
-      const nextIndex = pickNextShuffledIndex(playQueue.length, currentTrackIndex)
-      shouldAutoplayRef.current = autoplay
-      setActiveTrackId(playQueue[nextIndex].id)
-      setIsLyricsExpanded(false)
-      return
-    }
-    const nextIndex = (currentTrackIndex + delta + playQueue.length) % playQueue.length
-    shouldAutoplayRef.current = autoplay
-    setActiveTrackId(playQueue[nextIndex].id)
-    setIsLyricsExpanded(false)
   }
 
   const cycleRepeatMode = () => {
@@ -988,7 +1026,7 @@ function App() {
               aria-label={isPlaying ? 'Pause' : 'Lecture'}
               onClick={() => void handlePlayPause()}
             >
-              {isPlaying ? '❚❚' : '▷'}
+              <Icon name={isPlaying ? 'pause' : 'play_arrow'} />
             </button>
             <button
               type="button"
@@ -1002,14 +1040,14 @@ function App() {
                 })
               }}
             >
-              {isPlayerExpanded ? '▼' : '▲'}
+              <Icon name={isPlayerExpanded ? 'expand_more' : 'expand_less'} />
             </button>
           </div>
           {isPlayerExpanded && (
             <>
               <div className="player-bar__controls">
-                <button type="button" aria-label="Piste precedente" onClick={() => goToRelativeTrack(-1)}>
-                  ◁
+                <button type="button" aria-label="Piste precedente" onClick={() => goToRelativeTrack(-1, true)}>
+                  <Icon name="skip_previous" />
                 </button>
                 <button
                   type="button"
@@ -1017,10 +1055,10 @@ function App() {
                   aria-label={isPlaying ? 'Pause' : 'Lecture'}
                   onClick={() => void handlePlayPause()}
                 >
-                  {isPlaying ? '❚❚' : '▷'}
+                  <Icon name={isPlaying ? 'pause' : 'play_arrow'} />
                 </button>
-                <button type="button" aria-label="Piste suivante" onClick={() => goToRelativeTrack(1)}>
-                  ▷
+                <button type="button" aria-label="Piste suivante" onClick={() => goToRelativeTrack(1, true)}>
+                  <Icon name="skip_next" />
                 </button>
                 <button
                   type="button"
@@ -1029,7 +1067,7 @@ function App() {
                   aria-pressed={shuffleEnabled}
                   onClick={() => setShuffleEnabled((value) => !value)}
                 >
-                  ↝
+                  <Icon name="shuffle" />
                 </button>
                 <button
                   type="button"
@@ -1037,7 +1075,7 @@ function App() {
                   aria-label="Mode repetition"
                   onClick={cycleRepeatMode}
                 >
-                  {repeatMode === 'off' ? '1×' : repeatMode === 'all' ? '∞' : '1'}
+                  <Icon name={repeatMode === 'one' ? 'repeat_one' : 'repeat'} />
                 </button>
               </div>
               <input
@@ -1052,6 +1090,7 @@ function App() {
               <div className="player-bar__extra">
                 <label className="volume-inline">
                   <span className="sr-only">Volume</span>
+                  <Icon name="volume_up" />
                   <input
                     type="range"
                     min={0}
@@ -1063,16 +1102,16 @@ function App() {
                   />
                 </label>
                 <button type="button" className="btn" onClick={() => setPlaylistPickerTrack(activeTrack)}>
-                  + Playlist
+                  <Icon name="playlist_add" /> Playlist
                 </button>
                 <button type="button" className="btn" onClick={() => void shareTrack(activeTrack)}>
-                  Partager
+                  <Icon name="share" /> Partager
                 </button>
                 <button type="button" className="btn" onClick={() => setIsLyricsExpanded((value) => !value)}>
-                  {isLyricsExpanded ? 'Masquer lyrics' : 'Lyrics'}
+                  <Icon name="lyrics" /> {isLyricsExpanded ? 'Masquer lyrics' : 'Lyrics'}
                 </button>
                 <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
-                  Suno
+                  <Icon name="open_in_new" /> Suno
                 </a>
               </div>
               {isLyricsExpanded && (
@@ -1188,6 +1227,14 @@ function App() {
   )
 }
 
+function Icon({ name }: { name: string }) {
+  return (
+    <span className="material-symbols-outlined" aria-hidden>
+      {name}
+    </span>
+  )
+}
+
 function FilterChips({
   value,
   onChange,
@@ -1252,12 +1299,12 @@ function TrackRow({
       <div className="song-row__actions">
         {onAddToPlaylist && (
           <button type="button" className="song-cache-btn" onClick={onAddToPlaylist} aria-label={`Ajouter ${track.title} a une playlist`}>
-            +
+            <Icon name="playlist_add" />
           </button>
         )}
         {onRemove && (
           <button type="button" className="song-cache-btn" onClick={onRemove} aria-label={`Retirer ${track.title}`}>
-            ×
+            <Icon name="close" />
           </button>
         )}
         <button
@@ -1267,7 +1314,7 @@ function TrackRow({
           disabled={cached || percent != null}
           aria-label={cached ? `${track.title} deja local` : `Telecharger ${track.title}`}
         >
-          {cached ? 'OK' : percent != null ? `${percent}%` : '↓'}
+          {cached ? <Icon name="check" /> : percent != null ? `${percent}%` : <Icon name="download" />}
         </button>
       </div>
       {percent != null && (
