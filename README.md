@@ -1,83 +1,44 @@
-# NotyNyto Player (PWA)
+# Suno Public Player
 
-Application musicale **React + TypeScript + Vite**, pensée comme une app locale installable (PWA), mobile-first, et partageable.
+PWA multi-artistes pour ecouter les **sons publics** Suno.
 
-## Objectifs du projet
+## Idee
 
-- **Offline first**: fonctionnement hors ligne après installation/cache.
-- **Responsive mobile**: interface optimisée smartphone puis desktop.
-- **Clean architecture**: séparation claire Domain / Application / Presentation.
-- **Qualité stricte**: tests automatisés avec **couverture 100%**.
+1. Entrer un handle (`@noty2686`) ou une URL (`https://suno.com/@noty2686?page=songs`)
+2. L'app lit le profil **public** via un proxy serveur
+3. Lecture en stream (CloudFront)
+4. Telechargement local optionnel (IndexedDB) si le reseau est bon
+5. Bibliotheque persistee dans `localStorage`
 
-## Stack technique
+Demo prechargee: `@noty2686`.
 
-- `react`, `react-dom`
-- `typescript`
-- `vite`
-- `vite-plugin-pwa`
-- `vitest`, `@testing-library/react`, `@testing-library/jest-dom`
+## Stack
 
-## Architecture
+- React + TypeScript + Vite
+- Vercel Serverless (`/api/suno/profile`)
+- PWA (`vite-plugin-pwa`)
+- Clean architecture: `domain` / `application` / `presentation`
 
-```text
-src/
-  application/
-    usecases/
-      buildSharePayload.ts
-      getThemeDescription.ts
-      shareTrack.ts
-  domain/
-    entities/
-      track.ts
-  presentation/
-    (UI portée par App.tsx + styles globaux)
-  test/
-    setup.ts
-```
-
-### Règles appliquées
-
-- Le **domain** ne dépend de rien.
-- Les **use-cases** orchestrent les règles métier.
-- La **présentation** appelle les use-cases sans embarquer de logique métier profonde.
-
-## Lancer en local
+## Scripts
 
 ```bash
 npm install
 npm run dev
-```
-
-## Vérification qualité
-
-```bash
-npm run lint
 npm run test
 npm run test:coverage
-```
-
-Le seuil de couverture est configuré à **100%** (statements, branches, functions, lines) dans `vitest.config.ts`.
-
-## Build production
-
-```bash
 npm run build
-npm run preview
 ```
 
-## Audio embarqué
+## Deploy Vercel
 
-Déposer les fichiers audio dans `public/tracks/`.
+- Framework: Vite
+- Root: `./`
+- Build: `npm run build`
+- Output: `dist`
+- API routes: dossier `api/`
 
-Fichier attendu pour le morceau initial:
+## Limites
 
-- `public/tracks/double-face.exe-noty-v2.mp3`
-
-## Déploiement Vercel
-
-1. Connecter le repo GitHub sur [Vercel](https://vercel.com/).
-2. Preset framework: `Vite`.
-3. Build command: `npm run build`.
-4. Output directory: `dist`.
-
-Le service worker PWA est actif en production sous HTTPS.
+- Endpoint Suno public non officiel: peut evoluer
+- Sons prives ignores
+- Usage personnel, non affilie a Suno

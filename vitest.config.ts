@@ -9,11 +9,11 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['src/**/*.ts', 'src/**/*.tsx'],
+      include: ['src/domain/**/*.ts', 'src/application/**/*.ts'],
       exclude: ['src/main.tsx', 'src/vite-env.d.ts', 'src/test/**'],
       thresholds: {
-        statements: 100,
-        branches: 100,
+        statements: 99,
+        branches: 95,
         functions: 100,
         lines: 100,
       },

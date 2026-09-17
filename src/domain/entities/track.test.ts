@@ -1,12 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { FEATURED_TRACK } from './track'
+import { DEMO_ARTIST_HANDLE, type Track } from './track'
 
-describe('FEATURED_TRACK', () => {
-  it('expose un morceau initial coherent', () => {
-    expect(FEATURED_TRACK.id).toBe('noty-grand-frere-faux')
-    expect(FEATURED_TRACK.title).toBe('Grand Frere Faux')
-    expect(FEATURED_TRACK.artist).toBe('Noty')
-    expect(FEATURED_TRACK.genre).toContain('HyperPop')
-    expect(FEATURED_TRACK.audioUrl).toBe('/tracks/Grand Frère Faux - Noty.mp3')
+describe('track entities', () => {
+  it('expose le handle demo Noty', () => {
+    expect(DEMO_ARTIST_HANDLE).toBe('noty2686')
+  })
+
+  it('accepte une shape Track complete', () => {
+    const track: Track = {
+      id: 'abc',
+      title: 'Demo',
+      artist: 'Noty',
+      handle: 'noty2686',
+      audioUrl: 'https://example.com/a.m4a',
+      coverUrl: 'https://example.com/a.jpg',
+      duration: 120,
+      tags: 'hyperpop',
+      lyrics: 'hello',
+      sunoUrl: 'https://suno.com/song/abc',
+    }
+    expect(track.handle).toBe('noty2686')
   })
 })

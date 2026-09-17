@@ -1,4 +1,5 @@
-Place ici les fichiers audio embarques pour la PWA.
+Les MP3 locaux de ce dossier sont des archives legacy.
 
-Fichier attendu pour le morceau initial:
-- double-face.exe-noty-v2.mp3
+Le lecteur charge desormais les sons publics Suno via CloudFront
+(media_urls), avec cache IndexedDB optionnel. Tu n'as plus besoin
+d'ajouter manuellement des fichiers ici pour de nouveaux titres.

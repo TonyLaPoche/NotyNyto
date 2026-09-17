@@ -1,13 +1,43 @@
 import { describe, expect, it } from 'vitest'
-import { FEATURED_TRACK } from '../../domain/entities/track'
 import { buildSharePayload } from './buildSharePayload'
 
 describe('buildSharePayload', () => {
-  it('compose le payload de partage', () => {
-    const payload = buildSharePayload(FEATURED_TRACK, 'https://example.com')
+  it('construit un payload de partage neutre', () => {
+    const payload = buildSharePayload(
+      {
+        id: '1',
+        title: 'Track',
+        artist: 'Noty',
+        handle: 'noty2686',
+        audioUrl: 'https://cdn/a.m4a',
+        coverUrl: '',
+        duration: 10,
+        tags: 'hyperpop',
+        sunoUrl: 'https://suno.com/song/1',
+      },
+      'https://fallback.local',
+    )
 
-    expect(payload.title).toBe('Noty - Grand Frere Faux')
-    expect(payload.text).toContain('Noty x Nyto')
-    expect(payload.url).toBe('https://example.com')
+    expect(payload.title).toBe('Noty - Track')
+    expect(payload.text).toContain('@noty2686')
+    expect(payload.url).toBe('https://suno.com/song/1')
+  })
+
+  it('fallback sur url fournie si sunoUrl vide', () => {
+    const payload = buildSharePayload(
+      {
+        id: '1',
+        title: 'Track',
+        artist: 'Noty',
+        handle: 'noty2686',
+        audioUrl: 'https://cdn/a.m4a',
+        coverUrl: '',
+        duration: 10,
+        tags: '',
+        sunoUrl: '',
+      },
+      'https://fallback.local',
+    )
+    expect(payload.url).toBe('https://fallback.local')
   })
 })

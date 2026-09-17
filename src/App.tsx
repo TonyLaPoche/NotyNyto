@@ -1,49 +1,62 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { Theme } from './domain/entities/track'
-import { FEATURED_TRACK, TOP_TRACKS } from './domain/entities/track'
-import { getThemeDescription } from './application/usecases/getThemeDescription'
+import type { ArtistCatalog, Track } from './domain/entities/track'
+import { DEMO_ARTIST_HANDLE } from './domain/entities/track'
+import {
+  getArtistCatalog,
+  listArtistCatalogs,
+  removeArtistCatalog,
+  saveArtistCatalog,
+} from './application/usecases/artistLibrary'
+import { fetchPublicArtistCatalog } from './application/usecases/fetchPublicArtistCatalog'
+import {
+  cacheTrackAudio,
+  clearCachedAudio,
+  getCachedAudioByteLength,
+  listCachedTrackIds,
+  resolvePlayableUrl,
+} from './application/usecases/offlineAudioCache'
+import { canDownloadForOffline, readBrowserNetworkQuality } from './application/usecases/networkGate'
 import { shareTrack } from './application/usecases/shareTrack'
 
-const VISUALS = {
-  hero: '/visual/bannerSuno.png',
-  trackCover: '/visual/Double-Face.exe–Noty-v2.jpg',
-  split: '/visual/splitFaceNytoNoty.jpg',
-  landscape: '/visual/landscapeNytoNoty.jpg',
-  portrait: '/visual/notyBackgroundWhite.png',
-}
-
-const SHORT_BIO =
-  "Noty/Nyto, c'est une dualite HyperPop Cyberpunk: entre douceur glitch, colere froide et exutoire digital. La musique raconte la survie, l'identite et la rupture des masques."
-
-type Page = 'home' | 'songs' | 'gallery'
+type Page = 'home' | 'library' | 'artist'
 type RepeatMode = 'off' | 'all' | 'one'
 
 function App() {
   const [page, setPage] = useState<Page>('home')
-  const [theme, setTheme] = useState<Theme>('noty')
+  const [query, setQuery] = useState('')
+  const [library, setLibrary] = useState<ArtistCatalog[]>(() => listArtistCatalogs())
+  const [activeCatalog, setActiveCatalog] = useState<ArtistCatalog | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [canInstall, setCanInstall] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
-  const [volume, setVolume] = useState(0.8)
+  const [volume, setVolume] = useState(0.85)
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('off')
-  const [spectrum, setSpectrum] = useState<number[]>(() => Array.from({ length: 20 }, () => 0.08))
-  const [audioEnergy, setAudioEnergy] = useState(0)
+  const [activeTrackId, setActiveTrackId] = useState<string | null>(null)
+  const [playableUrl, setPlayableUrl] = useState<string | null>(null)
+  const [cachedIds, setCachedIds] = useState<string[]>([])
+  const [cacheBytes, setCacheBytes] = useState(0)
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false)
   const [isLyricsExpanded, setIsLyricsExpanded] = useState(false)
+  const [networkQuality, setNetworkQuality] = useState(() => readBrowserNetworkQuality())
+
   const installPromptRef = useRef<BeforeInstallPromptEvent | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const frameRef = useRef<number | null>(null)
+  const objectUrlRef = useRef<string | null>(null)
   const shouldAutoplayRef = useRef(false)
-  const [activeTrackId, setActiveTrackId] = useState(FEATURED_TRACK.id)
 
-  /* c8 ignore next -- garde defensive si un id devient invalide */
-  const activeTrack = TOP_TRACKS.find((track) => track.id === activeTrackId) ?? FEATURED_TRACK
+  const tracks = useMemo(() => activeCatalog?.tracks ?? [], [activeCatalog])
+  const activeTrack = tracks.find((track) => track.id === activeTrackId) ?? tracks[0] ?? null
+  const currentTrackIndex = activeTrack ? tracks.findIndex((track) => track.id === activeTrack.id) : -1
 
-  const appStyle = { '--audio-energy': audioEnergy.toFixed(3) } as CSSProperties
+  const appStyle = useMemo(
+    () => ({ '--play-progress': duration ? String(currentTime / duration) : '0' }) as CSSProperties,
+    [currentTime, duration],
+  )
 
   useEffect(() => {
     const handleBeforeInstallPrompt = (event: Event) => {
@@ -51,22 +64,25 @@ function App() {
       installPromptRef.current = event as BeforeInstallPromptEvent
       setCanInstall(true)
     }
-
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
-    return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
-    }
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
   }, [])
 
   useEffect(() => {
     const resolvePageFromHash = () => {
       const hash = window.location.hash.replace('#', '')
-      if (hash === '/songs') {
-        setPage('songs')
+      if (hash.startsWith('/artist/')) {
+        const handle = hash.replace('/artist/', '').split('/')[0]
+        setPage('artist')
+        const existing = getArtistCatalog(handle)
+        if (existing) {
+          setActiveCatalog(existing)
+          setActiveTrackId((previous) => previous ?? existing.tracks[0]?.id ?? null)
+        }
         return
       }
-      if (hash === '/gallery') {
-        setPage('gallery')
+      if (hash === '/library') {
+        setPage('library')
         return
       }
       setPage('home')
@@ -74,50 +90,202 @@ function App() {
 
     resolvePageFromHash()
     window.addEventListener('hashchange', resolvePageFromHash)
+    return () => window.removeEventListener('hashchange', resolvePageFromHash)
+  }, [])
 
+  useEffect(() => {
+    const refreshNetwork = () => {
+      setNetworkQuality(readBrowserNetworkQuality())
+    }
+    window.addEventListener('online', refreshNetwork)
+    window.addEventListener('offline', refreshNetwork)
     return () => {
-      window.removeEventListener('hashchange', resolvePageFromHash)
+      window.removeEventListener('online', refreshNetwork)
+      window.removeEventListener('offline', refreshNetwork)
     }
   }, [])
 
   useEffect(() => {
-    return () => {
-      if (frameRef.current) {
-        cancelAnimationFrame(frameRef.current)
-      }
-      void audioContextRef.current?.close()
-    }
+    void refreshCacheState()
   }, [])
 
   useEffect(() => {
     const audio = audioRef.current
-    /* c8 ignore next -- element audio toujours present apres montage */
     if (!audio) return
     audio.volume = volume
   }, [volume])
 
+  /* c8 ignore start -- resolution async cache/stream */
   useEffect(() => {
-    if (!shouldAutoplayRef.current) return
+    if (!activeTrack) return
 
+    let cancelled = false
+    void (async () => {
+      const nextUrl = await resolvePlayableUrl(activeTrack.id, activeTrack.audioUrl)
+      if (cancelled) {
+        if (nextUrl.startsWith('blob:')) URL.revokeObjectURL(nextUrl)
+        return
+      }
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current)
+        objectUrlRef.current = null
+      }
+      if (nextUrl.startsWith('blob:')) {
+        objectUrlRef.current = nextUrl
+      }
+      setPlayableUrl(nextUrl)
+      setCurrentTime(0)
+      setDuration(activeTrack.duration || 0)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeTrack])
+  /* c8 ignore end */
+
+  useEffect(() => {
+    if (!shouldAutoplayRef.current || !playableUrl) return
     const audio = audioRef.current
-    /* c8 ignore next -- element audio toujours present apres montage */
     if (!audio) return
     shouldAutoplayRef.current = false
+    void audio.play().catch(() => setIsPlaying(false))
+  }, [playableUrl, activeTrackId])
 
-    const tryPlay = async () => {
+  useEffect(() => {
+    const bootstrap = async () => {
+      const existing = getArtistCatalog(DEMO_ARTIST_HANDLE)
+      if (existing) {
+        setLibrary(listArtistCatalogs())
+        if (!activeCatalog) {
+          setActiveCatalog(existing)
+          setActiveTrackId(existing.tracks[0]?.id ?? null)
+        }
+        return
+      }
+
+      if (!navigator.onLine) {
+        setError('Hors ligne: ajoute un artiste quand le reseau revient.')
+        return
+      }
+
+      setIsLoading(true)
       try {
-        await audio.play()
-      } catch {
-        /* c8 ignore next -- fallback securite si autoplay bloque */
-        setIsPlaying(false)
+        const catalog = await fetchPublicArtistCatalog(DEMO_ARTIST_HANDLE)
+        const nextLibrary = saveArtistCatalog(catalog)
+        setLibrary(nextLibrary)
+        setActiveCatalog(catalog)
+        setActiveTrackId(catalog.tracks[0]?.id ?? null)
+        setStatusMessage(`Demo chargee: @${catalog.artist.handle} (${catalog.tracks.length} sons publics)`)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Impossible de charger la demo')
+      } finally {
+        setIsLoading(false)
       }
     }
 
-    void tryPlay()
-  }, [activeTrackId])
+    void bootstrap()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /* c8 ignore start -- Media Session API absente en tests */
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined' || !activeTrack) return
+    const audio = audioRef.current
+    if (!audio) return
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: activeTrack.title,
+      artist: activeTrack.artist,
+      album: `@${activeTrack.handle}`,
+      artwork: activeTrack.coverUrl
+        ? [{ src: activeTrack.coverUrl, sizes: '512x512', type: 'image/jpeg' }]
+        : [],
+    })
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+    navigator.mediaSession.setActionHandler('play', () => {
+      void audio.play()
+    })
+    navigator.mediaSession.setActionHandler('pause', () => {
+      audio.pause()
+    })
+    navigator.mediaSession.setActionHandler('previoustrack', () => {
+      if (!tracks.length || currentTrackIndex < 0) return
+      const nextIndex = (currentTrackIndex - 1 + tracks.length) % tracks.length
+      shouldAutoplayRef.current = true
+      setActiveTrackId(tracks[nextIndex].id)
+      setIsLyricsExpanded(false)
+    })
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+      if (!tracks.length || currentTrackIndex < 0) return
+      const nextIndex = (currentTrackIndex + 1) % tracks.length
+      shouldAutoplayRef.current = true
+      setActiveTrackId(tracks[nextIndex].id)
+      setIsLyricsExpanded(false)
+    })
+    navigator.mediaSession.setActionHandler('seekto', (details) => {
+      if (typeof details.seekTime === 'number') {
+        const bounded = Math.min(Math.max(details.seekTime, 0), duration || 0)
+        audio.currentTime = bounded
+        setCurrentTime(bounded)
+      }
+    })
+    if ('setPositionState' in navigator.mediaSession && duration > 0) {
+      navigator.mediaSession.setPositionState({
+        duration,
+        playbackRate: audio.playbackRate || 1,
+        position: Math.min(currentTime, duration),
+      })
+    }
+  }, [activeTrack, isPlaying, currentTime, duration, tracks, currentTrackIndex])
+  /* c8 ignore end */
+
+  async function refreshCacheState() {
+    const ids = await listCachedTrackIds()
+    const bytes = await getCachedAudioByteLength()
+    setCachedIds(ids)
+    setCacheBytes(bytes)
+  }
+
+  async function handleScanArtist(rawInput: string) {
+    setError(null)
+    setStatusMessage(null)
+    setIsLoading(true)
+    try {
+      const catalog = await fetchPublicArtistCatalog(rawInput)
+      const nextLibrary = saveArtistCatalog(catalog)
+      setLibrary(nextLibrary)
+      setActiveCatalog(catalog)
+      setActiveTrackId(catalog.tracks[0]?.id ?? null)
+      setPage('artist')
+      window.location.hash = `/artist/${catalog.artist.handle}`
+      setStatusMessage(`${catalog.tracks.length} sons publics trouves pour @${catalog.artist.handle}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Scan impossible')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  function openArtist(catalog: ArtistCatalog) {
+    setActiveCatalog(catalog)
+    setActiveTrackId(catalog.tracks[0]?.id ?? null)
+    setPage('artist')
+    window.location.hash = `/artist/${catalog.artist.handle}`
+  }
+
+  function deleteArtist(handle: string) {
+    const next = removeArtistCatalog(handle)
+    setLibrary(next)
+    if (activeCatalog?.artist.handle === handle) {
+      setActiveCatalog(next[0] ?? null)
+      setActiveTrackId(next[0]?.tracks[0]?.id ?? null)
+    }
+  }
 
   const handleInstall = async () => {
-    const promptEvent = installPromptRef.current as BeforeInstallPromptEvent
+    const promptEvent = installPromptRef.current
+    if (!promptEvent) return
     await promptEvent.prompt()
     await promptEvent.userChoice
     installPromptRef.current = null
@@ -126,19 +294,16 @@ function App() {
 
   const handlePlayPause = async () => {
     const audio = audioRef.current
-    /* c8 ignore next -- element audio toujours present apres montage */
     if (!audio) return
-
     if (audio.paused) {
       try {
         await audio.play()
+        setIsPlaying(true)
       } catch {
         return
       }
-      setIsPlaying(true)
       return
     }
-
     audio.pause()
     setIsPlaying(false)
   }
@@ -146,269 +311,191 @@ function App() {
   const handleSeek = (value: number) => {
     const audio = audioRef.current
     if (!audio || !duration) return
-
     const nextValue = Math.min(Math.max(value, 0), duration)
     audio.currentTime = nextValue
     setCurrentTime(nextValue)
   }
 
-  const setTrackByIndex = (nextIndex: number, shouldAutoplay = false) => {
-    /* c8 ignore next -- la liste est statique et non vide */
-    if (!TOP_TRACKS.length) return
-
-    const normalizedIndex = ((nextIndex % TOP_TRACKS.length) + TOP_TRACKS.length) % TOP_TRACKS.length
-    const targetTrack = TOP_TRACKS[normalizedIndex]
-    shouldAutoplayRef.current = shouldAutoplay
-    setActiveTrackId(targetTrack.id)
-    setCurrentTime(0)
-    setDuration(0)
+  const selectTrack = (track: Track, autoplay = false) => {
+    shouldAutoplayRef.current = autoplay
+    setActiveTrackId(track.id)
     setIsLyricsExpanded(false)
   }
 
-  const getCurrentTrackIndex = () => {
-    const index = TOP_TRACKS.findIndex((track) => track.id === activeTrack.id)
-    /* c8 ignore next -- fallback defensif */
-    return index < 0 ? 0 : index
-  }
-
-  const goToNextTrack = (shouldAutoplay = isPlaying) => {
-    setTrackByIndex(getCurrentTrackIndex() + 1, shouldAutoplay)
-  }
-
-  const goToPreviousTrack = (shouldAutoplay = isPlaying) => {
-    setTrackByIndex(getCurrentTrackIndex() - 1, shouldAutoplay)
+  const goToRelativeTrack = (delta: number, autoplay = isPlaying) => {
+    if (!tracks.length || currentTrackIndex < 0) return
+    const nextIndex = (currentTrackIndex + delta + tracks.length) % tracks.length
+    selectTrack(tracks[nextIndex], autoplay)
   }
 
   const cycleRepeatMode = () => {
-    setRepeatMode((prev) => {
-      if (prev === 'off') return 'all'
-      if (prev === 'all') return 'one'
-      return 'off'
-    })
+    setRepeatMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'))
   }
 
-  const setupAudioAnalysis = async () => {
-    const audio = audioRef.current
-    /* c8 ignore next -- garde defensive */
-    if (!audio || analyserRef.current) return
-
-    const audioContext = new AudioContext()
-    const analyser = audioContext.createAnalyser()
-    analyser.fftSize = 256
-    analyser.smoothingTimeConstant = 0.8
-
-    const source = audioContext.createMediaElementSource(audio)
-    source.connect(analyser)
-    analyser.connect(audioContext.destination)
-
-    audioContextRef.current = audioContext
-    analyserRef.current = analyser
-  }
-
-  const startReactiveLoop = () => {
-    const analyser = analyserRef.current
-    /* c8 ignore next -- garde defensive */
-    if (!analyser) return
-
-    const binCount = analyser.frequencyBinCount
-    const data = new Uint8Array(binCount)
-    const barCount = 20
-    const binPerBar = Math.floor(binCount / barCount)
-
-    const draw = () => {
-      analyser.getByteFrequencyData(data)
-
-      const nextSpectrum = Array.from({ length: barCount }, (_, index) => {
-        const start = index * binPerBar
-        const end = start + binPerBar
-        let total = 0
-        for (let i = start; i < end; i += 1) {
-          total += data[i]
-        }
-        const average = total / Math.max(binPerBar, 1)
-        return Math.max(average / 255, 0.06)
-      })
-
-      const bassEnergy = nextSpectrum.slice(0, 5).reduce((sum, value) => sum + value, 0) / 5
-      setSpectrum(nextSpectrum)
-      setAudioEnergy(bassEnergy)
-      frameRef.current = requestAnimationFrame(draw)
+  const downloadTrack = async (track: Track) => {
+    if (!canDownloadForOffline(networkQuality)) {
+      setError('Reseau insuffisant pour telecharger. Passe en Wi-Fi ou 4G.')
+      return
     }
-
-    if (frameRef.current) {
-      cancelAnimationFrame(frameRef.current)
+    setStatusMessage(`Telechargement: ${track.title}`)
+    try {
+      await cacheTrackAudio(track.id, track.audioUrl)
+      await refreshCacheState()
+      setStatusMessage(`${track.title} disponible hors ligne`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Telechargement impossible')
     }
-    draw()
   }
 
-  const stopReactiveLoop = () => {
-    if (frameRef.current) {
-      cancelAnimationFrame(frameRef.current)
-      frameRef.current = null
+  const downloadAll = async () => {
+    if (!activeCatalog) return
+    if (!canDownloadForOffline(networkQuality)) {
+      setError('Reseau insuffisant pour tout telecharger.')
+      return
     }
-    setAudioEnergy(0)
-    setSpectrum((previous) => previous.map(() => 0.08))
-  }
-
-  const currentTrackIndex = getCurrentTrackIndex()
-  const upcomingTracks = Array.from({ length: Math.min(3, TOP_TRACKS.length - 1) }, (_, offset) => {
-    const index = (currentTrackIndex + offset + 1) % TOP_TRACKS.length
-    return TOP_TRACKS[index]
-  })
-
-  /* c8 ignore start -- API lockscreen non supportee en environnement de test */
-  useEffect(() => {
-    if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return
-    const audio = audioRef.current
-    if (!audio) return
-    const coverArtwork = activeTrack.coverUrl ?? VISUALS.trackCover
-
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: activeTrack.title,
-      artist: activeTrack.artist,
-      album: 'Noty x Nyto',
-      artwork: [{ src: coverArtwork, sizes: '512x512', type: 'image/jpeg' }],
-    })
-
-    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
-
-    navigator.mediaSession.setActionHandler('play', () => {
-      void audio.play()
-    })
-    navigator.mediaSession.setActionHandler('pause', () => {
-      audio.pause()
-    })
-    navigator.mediaSession.setActionHandler('previoustrack', () => {
-      setTrackByIndex(currentTrackIndex - 1, true)
-    })
-    navigator.mediaSession.setActionHandler('nexttrack', () => {
-      setTrackByIndex(currentTrackIndex + 1, true)
-    })
-    navigator.mediaSession.setActionHandler('seekto', (details) => {
-      if (typeof details.seekTime === 'number') {
-        const boundedSeek = Math.min(Math.max(details.seekTime, 0), duration || 0)
-        audio.currentTime = boundedSeek
-        setCurrentTime(boundedSeek)
+    setIsLoading(true)
+    try {
+      for (const track of activeCatalog.tracks) {
+        if (cachedIds.includes(track.id)) continue
+        await cacheTrackAudio(track.id, track.audioUrl)
       }
-    })
-
-    if ('setPositionState' in navigator.mediaSession && duration > 0) {
-      navigator.mediaSession.setPositionState({
-        duration,
-        playbackRate: audio.playbackRate || 1,
-        position: Math.min(currentTime, duration),
-      })
+      await refreshCacheState()
+      setStatusMessage(`Cache local pret pour @${activeCatalog.artist.handle}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Telechargement impossible')
+    } finally {
+      setIsLoading(false)
     }
-  }, [activeTrack, currentTrackIndex, isPlaying, currentTime, duration])
-  /* c8 ignore end */
+  }
 
-  const downloadName = `${activeTrack.title.replace(/[^\w.-]+/g, '_')}.mp3`
+  const wipeCache = async () => {
+    await clearCachedAudio()
+    await refreshCacheState()
+    setStatusMessage('Cache audio vide')
+  }
 
   return (
-    <main className={`app app--${theme} ${isPlaying ? 'app--reactive' : ''}`} style={appStyle}>
-      <div className="reactive-backdrop" aria-hidden />
+    <main className={`app ${isPlaying ? 'app--playing' : ''}`} style={appStyle}>
+      <div className="atmosphere" aria-hidden />
+
       <nav className="site-nav" aria-label="Navigation principale">
-        <a href="#/" className={`nav-link ${page === 'home' ? 'nav-link--active' : ''}`}>
+        <a
+          href="#/"
+          className={`nav-link ${page === 'home' ? 'nav-link--active' : ''}`}
+          onClick={() => setPage('home')}
+        >
           Accueil
         </a>
-        <a href="#/songs" className={`nav-link ${page === 'songs' ? 'nav-link--active' : ''}`}>
-          Sons
+        <a
+          href="#/library"
+          className={`nav-link ${page === 'library' ? 'nav-link--active' : ''}`}
+          onClick={() => setPage('library')}
+        >
+          Bibliotheque
         </a>
-        <a href="#/gallery" className={`nav-link ${page === 'gallery' ? 'nav-link--active' : ''}`}>
-          Galerie DA
-        </a>
+        {activeCatalog && (
+          <a
+            href={`#/artist/${activeCatalog.artist.handle}`}
+            className={`nav-link ${page === 'artist' ? 'nav-link--active' : ''}`}
+            onClick={() => setPage('artist')}
+          >
+            Artiste
+          </a>
+        )}
       </nav>
-      <div className="theme-toggle" role="group" aria-label="Choix du theme">
-        <button
-          type="button"
-          className={`chip ${theme === 'noty' ? 'chip--active' : ''}`}
-          onClick={() => setTheme('noty')}
+
+      <header className="hero">
+        <p className="label">Suno Public Player</p>
+        <h1>Lecteur multi-artistes</h1>
+        <p className="subtitle">
+          Scanne un profil public Suno, ecoute en stream, telecharge localement si le reseau le permet.
+        </p>
+        <p className="disclaimer">Sons publics uniquement · non affilie a Suno · usage personnel</p>
+
+        <form
+          className="search-bar"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void handleScanArtist(query)
+          }}
         >
-          Noty
-        </button>
-        <button
-          type="button"
-          className={`chip ${theme === 'nyto' ? 'chip--active' : ''}`}
-          onClick={() => setTheme('nyto')}
-        >
-          Nyto
-        </button>
-      </div>
-      <header className="hero" data-testid="hero">
-        <img className="hero__background" src={VISUALS.hero} alt="" aria-hidden />
-        <div className="hero__overlay" />
-        <div className="hero__noise" aria-hidden />
-        <div className="hero__orb hero__orb--a" aria-hidden />
-        <div className="hero__orb hero__orb--b" aria-hidden />
-        <div className="hero__content">
-          <div className="hero__text">
-            <p className="label">Noty / Nyto universe</p>
-            <h1>NotyNyto Offline Player</h1>
-            <p className="subtitle">{getThemeDescription(theme)}</p>
-            <p className="hero__description">
-              HyperPop cyberpunk, darkcore et frenchcore emotionnel. Un projet narratif ou chaque track est une
-              transmission brute entre Noty et Nyto.
-            </p>
-            <a className="hero__link" href="https://suno.com/@noty2686" target="_blank" rel="noreferrer">
-              Voir le profil Suno
-            </a>
-          </div>
-          <div className="hero__now-playing" aria-label="Morceau mis en avant">
-            <span>Now playing</span>
-            <strong>{activeTrack.title}</strong>
-            <small>{activeTrack.artist}</small>
-          </div>
+          <label htmlFor="artist-search" className="sr-only">
+            Chercher un artiste Suno
+          </label>
+          <input
+            id="artist-search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="@handle ou https://suno.com/@artiste"
+            aria-label="Chercher un artiste Suno"
+          />
+          <button type="submit" className="btn btn--primary" disabled={isLoading}>
+            Scanner
+          </button>
+        </form>
+
+        <div className="meta-row">
+          <span className={`network-pill network-pill--${networkQuality}`}>Reseau: {networkQuality}</span>
+          <span className="cache-pill">Cache: {formatBytes(cacheBytes)}</span>
+          {canInstall && (
+            <button type="button" className="btn" onClick={handleInstall}>
+              Installer l&apos;app
+            </button>
+          )}
+          <button type="button" className="btn" onClick={() => void wipeCache()}>
+            Vider le cache
+          </button>
         </div>
+
+        {error && <p className="banner banner--error">{error}</p>}
+        {statusMessage && <p className="banner banner--ok">{statusMessage}</p>}
+        {isLoading && <p className="banner">Chargement...</p>}
       </header>
 
-      <section className="panel">
-        <div className="panel__top">
-          <img
-            className="cover"
-            src={activeTrack.coverUrl}
-            alt={`Pochette ${activeTrack.title}`}
-          />
-          <div className="meta">
-            <p className="label">Titre embarque</p>
-            <h2>{activeTrack.title}</h2>
-            <p>{activeTrack.artist}</p>
-            <p className="genre">{activeTrack.genre}</p>
-            <div className="meta__status">
-              <span className={`status-pill ${isPlaying ? 'status-pill--playing' : ''}`}>
-                {isPlaying ? 'En lecture' : 'En pause'}
-              </span>
-              <span className="meta__time">
-                {formatTime(currentTime)} / {formatTime(duration)}
-              </span>
+      {activeTrack && (
+        <section className={`player-panel ${isPlaying ? 'player-panel--playing' : ''}`}>
+          <div className="player-panel__top">
+            {activeTrack.coverUrl ? (
+              <img className="cover" src={activeTrack.coverUrl} alt={`Pochette ${activeTrack.title}`} />
+            ) : (
+              <div className="cover cover--empty" aria-hidden />
+            )}
+            <div className="meta">
+              <p className="label">Now playing</p>
+              <h2>{activeTrack.title}</h2>
+              <p>
+                {activeTrack.artist} · @{activeTrack.handle}
+              </p>
+              <p className="genre">{activeTrack.tags || 'Public Suno track'}</p>
+              <div className="meta__status">
+                <span className={`status-pill ${isPlaying ? 'status-pill--playing' : ''}`}>
+                  {isPlaying ? 'En lecture' : 'En pause'}
+                </span>
+                <span className="meta__time">
+                  {formatTime(currentTime)} / {formatTime(duration)}
+                </span>
+                {cachedIds.includes(activeTrack.id) && <span className="status-pill">Hors ligne</span>}
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className={`player-shell ${isPlaying ? 'player-shell--playing' : ''}`}>
-          <div className="player-shell__header">
-            <div className="transport">
-              <button type="button" className="transport-btn" onClick={() => goToPreviousTrack()}>
-                PREV
-              </button>
-              <button type="button" className="player-btn" onClick={handlePlayPause}>
-                {isPlaying ? 'PAUSE' : 'PLAY'}
-              </button>
-              <button type="button" className="transport-btn" onClick={() => goToNextTrack()}>
-                NEXT
-              </button>
-              <button
-                type="button"
-                className={`repeat-btn ${repeatMode !== 'off' ? 'repeat-btn--active' : ''}`}
-                onClick={cycleRepeatMode}
-              >
-                {repeatMode === 'off' ? 'REP OFF' : repeatMode === 'all' ? 'REP ALL' : 'REP 1'}
-              </button>
-            </div>
-            <div className="visualizer visualizer--live" aria-hidden>
-              {spectrum.map((value, index) => (
-                <span key={`${index}-${Math.round(value * 1000)}`} style={{ '--bar-level': value } as CSSProperties} />
-              ))}
-            </div>
+          <div className="transport">
+            <button type="button" className="transport-btn" onClick={() => goToRelativeTrack(-1)}>
+              PREV
+            </button>
+            <button type="button" className="player-btn" onClick={() => void handlePlayPause()}>
+              {isPlaying ? 'PAUSE' : 'PLAY'}
+            </button>
+            <button type="button" className="transport-btn" onClick={() => goToRelativeTrack(1)}>
+              NEXT
+            </button>
+            <button
+              type="button"
+              className={`repeat-btn ${repeatMode !== 'off' ? 'repeat-btn--active' : ''}`}
+              onClick={cycleRepeatMode}
+            >
+              {repeatMode === 'off' ? 'REP OFF' : repeatMode === 'all' ? 'REP ALL' : 'REP 1'}
+            </button>
           </div>
 
           <input
@@ -420,11 +507,6 @@ function App() {
             aria-label="Progression du morceau"
             onChange={(event) => handleSeek(Number(event.target.value))}
           />
-
-          <div className="player-time">
-            <span>{formatTime(currentTime)}</span>
-            <span>{formatTime(duration)}</span>
-          </div>
 
           <div className="volume-control">
             <label htmlFor="volume-range">Volume</label>
@@ -440,282 +522,217 @@ function App() {
             />
             <span>{Math.round(volume * 100)}%</span>
           </div>
-        </div>
 
-        <audio
-          ref={audioRef}
-          className="audio-element"
-          preload="metadata"
-          src={activeTrack.audioUrl}
-          aria-label="Lecteur audio principal"
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => {
-            setIsPlaying(false)
-            stopReactiveLoop()
-          }}
-          onLoadedMetadata={(event) => {
-            setDuration(event.currentTarget.duration || 0)
-          }}
-          onTimeUpdate={(event) => {
-            setCurrentTime(event.currentTarget.currentTime)
-          }}
-          onCanPlay={async () => {
-            await setupAudioAnalysis()
-          }}
-          onPlaying={async () => {
-            await audioContextRef.current?.resume()
-            startReactiveLoop()
-          }}
-          onEnded={() => {
-            if (repeatMode === 'one') {
-              const audio = audioRef.current
-              /* c8 ignore next -- garde defensive */
-              if (audio) {
-                audio.currentTime = 0
-                void audio.play()
+          <audio
+            ref={audioRef}
+            className="audio-element"
+            preload="metadata"
+            src={playableUrl ?? undefined}
+            aria-label="Lecteur audio principal"
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || activeTrack.duration || 0)}
+            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onEnded={() => {
+              if (repeatMode === 'one') {
+                const audio = audioRef.current
+                if (audio) {
+                  audio.currentTime = 0
+                  void audio.play()
+                }
+                return
               }
-              return
-            }
+              if (repeatMode === 'all') {
+                goToRelativeTrack(1, true)
+                return
+              }
+              setIsPlaying(false)
+              setCurrentTime(0)
+            }}
+          />
 
-            if (repeatMode === 'all') {
-              goToNextTrack(true)
-              return
-            }
-
-            setIsPlaying(false)
-            setCurrentTime(0)
-            stopReactiveLoop()
-          }}
-        />
-
-        <div className="actions">
-          <button type="button" className="btn btn--primary" onClick={() => shareTrack(activeTrack)}>
-            Partager
-          </button>
-          <button type="button" className="btn btn--secondary" onClick={() => setIsDownloadModalOpen(true)}>
-            Telecharger MP3
-          </button>
-          {canInstall && (
-            <button type="button" className="btn" onClick={handleInstall}>
-              Installer l'app
+          <div className="actions">
+            <button type="button" className="btn btn--primary" onClick={() => void shareTrack(activeTrack)}>
+              Partager
             </button>
-          )}
-        </div>
+            <button type="button" className="btn btn--secondary" onClick={() => setIsDownloadModalOpen(true)}>
+              Lien Suno / licence
+            </button>
+            <button type="button" className="btn" onClick={() => void downloadTrack(activeTrack)}>
+              Telecharger local
+            </button>
+            <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
+              Ouvrir sur Suno
+            </a>
+          </div>
 
-        <section className="up-next" aria-label="File d attente">
-          <h3 className="up-next__title">A suivre</h3>
-          <div className="up-next__list">
-            {upcomingTracks.map((track) => (
-              <button
-                key={`up-next-${track.id}`}
-                type="button"
-                className="up-next__item"
-                aria-label={`Lire ensuite ${track.title}`}
-                onClick={() => setTrackByIndex(TOP_TRACKS.findIndex((item) => item.id === track.id), true)}
-              >
-                <span>{track.title}</span>
-                <small>{track.artist}</small>
+          <button
+            type="button"
+            className="lyrics-toggle"
+            aria-expanded={isLyricsExpanded}
+            aria-controls="lyrics-accordion"
+            onClick={() => setIsLyricsExpanded((previous) => !previous)}
+          >
+            {isLyricsExpanded ? 'Masquer les lyrics' : 'Voir les lyrics'}
+          </button>
+          <section
+            id="lyrics-accordion"
+            className={`lyrics-accordion ${isLyricsExpanded ? 'lyrics-accordion--open' : ''}`}
+            aria-label="Lyrics du son en cours"
+            aria-hidden={!isLyricsExpanded}
+          >
+            <div className="lyrics-panel">
+              <h3 className="lyrics-title">Lyrics</h3>
+              <pre className="lyrics-content">{activeTrack.lyrics || 'Lyrics indisponibles pour ce son public.'}</pre>
+            </div>
+          </section>
+        </section>
+      )}
+
+      {page === 'home' && (
+        <section className="panel" aria-label="Demarrer">
+          <h3 className="section-title">Commencer</h3>
+          <p className="section-subtitle">
+            Colle une URL du type <code>https://suno.com/@noty2686?page=songs</code> ou un handle. Seuls les sons
+            publics sont indexes.
+          </p>
+          <div className="home-actions">
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => void handleScanArtist(DEMO_ARTIST_HANDLE)}
+            >
+              Recharger la demo @{DEMO_ARTIST_HANDLE}
+            </button>
+            {library[0] && (
+              <button type="button" className="btn" onClick={() => openArtist(library[0])}>
+                Ouvrir {library[0].artist.displayName}
               </button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {page === 'library' && (
+        <section className="panel" aria-label="Bibliotheque locale">
+          <h3 className="section-title">Bibliotheque locale</h3>
+          <p className="section-subtitle">Artistes scannes et conserves dans localStorage.</p>
+          <div className="artist-list">
+            {library.length === 0 && <p>Aucun artiste pour le moment.</p>}
+            {library.map((catalog) => (
+              <article key={catalog.artist.handle} className="artist-card">
+                <button type="button" className="artist-card__main" onClick={() => openArtist(catalog)}>
+                  {catalog.artist.avatarUrl ? (
+                    <img src={catalog.artist.avatarUrl} alt="" />
+                  ) : (
+                    <div className="avatar-fallback" aria-hidden />
+                  )}
+                  <div>
+                    <strong>{catalog.artist.displayName}</strong>
+                    <small>
+                      @{catalog.artist.handle} · {catalog.tracks.length} sons
+                    </small>
+                  </div>
+                </button>
+                <button type="button" className="btn" onClick={() => deleteArtist(catalog.artist.handle)}>
+                  Retirer
+                </button>
+              </article>
             ))}
           </div>
         </section>
-
-        <button
-          type="button"
-          className="lyrics-toggle"
-          aria-expanded={isLyricsExpanded}
-          aria-controls="lyrics-accordion"
-          onClick={() => setIsLyricsExpanded((previous) => !previous)}
-        >
-          {isLyricsExpanded ? 'Masquer les lyrics' : 'Voir les lyrics'}
-        </button>
-
-        <section
-          id="lyrics-accordion"
-          className={`lyrics-accordion ${isLyricsExpanded ? 'lyrics-accordion--open' : ''}`}
-          aria-label="Lyrics du son en cours"
-          aria-hidden={!isLyricsExpanded}
-        >
-          <div className="lyrics-panel">
-            <h3 className="lyrics-title">Lyrics</h3>
-            <pre className="lyrics-content">{activeTrack.lyrics}</pre>
-          </div>
-        </section>
-      </section>
-
-      {page === 'home' && (
-        <>
-          <section className="home-about" aria-label="Presentation musicale Noty et Nyto">
-            <div className="home-about__bio">
-              <p className="home-about__kicker">Manifeste Sonore</p>
-              <h3 className="section-title">Presentation musicale</h3>
-              <p className="section-subtitle">{SHORT_BIO}</p>
-              <div className="home-about__tags">
-                <span>HyperPop</span>
-                <span>Darkcore</span>
-                <span>Frenchcore</span>
-                <span>Cyberpunk</span>
-              </div>
-              <p className="home-about__note">
-                Melange de darkcore, frenchcore, hyperpop et synthwave nerveuse. Chaque track est pense comme un
-                chapitre d'un journal sonore.
-              </p>
-              <blockquote className="home-about__quote">
-                "Noty c'est le masque. Nyto c'est l'echo. Au milieu, la verite qui fuit."
-              </blockquote>
-            </div>
-            <div className="home-about__highlights">
-              <h4>A ecouter maintenant</h4>
-              <ul>
-                {TOP_TRACKS.slice(0, 3).map((track) => (
-                  <li key={`home-highlight-${track.id}`}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPage('songs')
-                        window.location.hash = '/songs'
-                        setTrackByIndex(TOP_TRACKS.findIndex((item) => item.id === track.id), false)
-                      }}
-                    >
-                      <span>{track.title}</span>
-                      <small>{track.artist}</small>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <div className="home-about__stats" aria-label="Statistiques musicales">
-                <div>
-                  <strong>{TOP_TRACKS.length}</strong>
-                  <span>tracks</span>
-                </div>
-                <div>
-                  <strong>2</strong>
-                  <span>alter ego</span>
-                </div>
-                <div>
-                  <strong>1</strong>
-                  <span>univers</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="visual-grid" aria-label="Univers visuel Noty Nyto">
-            <img className="visual visual--wide" src={VISUALS.landscape} alt="Univers cyberpunk Noty et Nyto" />
-            <img className="visual visual--tall" src={VISUALS.portrait} alt="Portrait Noty" />
-            <img className="visual visual--wide" src={VISUALS.split} alt="Visuel split face Nyto Noty" />
-          </section>
-        </>
       )}
 
-      {page === 'songs' && (
-        <section className="songs-page" aria-label="Top songs Noty Nyto">
-          <h3 className="section-title">Top 10 songs</h3>
-          <p className="section-subtitle">
-            Tous tes tracks locaux sont relies au player. Clique un son dans la liste pour le charger.
-          </p>
+      {page === 'artist' && activeCatalog && (
+        <section className="panel" aria-label={`Sons publics de ${activeCatalog.artist.displayName}`}>
+          <div className="artist-header">
+            {activeCatalog.artist.avatarUrl ? (
+              <img src={activeCatalog.artist.avatarUrl} alt="" className="artist-avatar" />
+            ) : (
+              <div className="artist-avatar avatar-fallback" aria-hidden />
+            )}
+            <div>
+              <h3 className="section-title">{activeCatalog.artist.displayName}</h3>
+              <p className="section-subtitle">
+                @{activeCatalog.artist.handle} · {activeCatalog.tracks.length} sons publics
+              </p>
+              <a href={`https://suno.com/@${activeCatalog.artist.handle}?page=songs`} target="_blank" rel="noreferrer">
+                Voir sur Suno
+              </a>
+            </div>
+            <button type="button" className="btn btn--primary" onClick={() => void downloadAll()}>
+              Tout telecharger
+            </button>
+          </div>
+
           <div className="songs-list">
-            {TOP_TRACKS.map((track) => (
+            {activeCatalog.tracks.map((track, index) => (
               <button
                 key={track.id}
                 type="button"
-                className={`song-row ${track.id === activeTrack.id ? 'song-row--active' : ''}`}
-                onClick={() => {
-                  audioRef.current?.pause()
-                  setTrackByIndex(TOP_TRACKS.findIndex((item) => item.id === track.id), false)
-                  setIsPlaying(false)
-                  setCurrentTime(0)
-                  stopReactiveLoop()
-                }}
+                className={`song-row ${track.id === activeTrack?.id ? 'song-row--active' : ''}`}
+                onClick={() => selectTrack(track, true)}
               >
-                <span className="song-rank">#{track.rank}</span>
+                <span className="song-rank">#{index + 1}</span>
                 <span className="song-title">{track.title}</span>
-                <span className="song-artist">{track.artist}</span>
+                <span className="song-artist">
+                  {formatTime(track.duration)}
+                  {cachedIds.includes(track.id) ? ' · local' : ''}
+                </span>
               </button>
             ))}
           </div>
         </section>
       )}
 
-      {page === 'gallery' && (
-        <section className="gallery-page" aria-label="Galerie complete DA Noty et Nyto">
-          <h3 className="section-title">Galerie DA Noty x Nyto</h3>
-          <div className="gallery-grid">
-            <img className="visual" src={VISUALS.hero} alt="Banner Suno Noty Nyto" />
-            <img className="visual" src={VISUALS.trackCover} alt="Cover Double Face.exe" />
-            <img className="visual" src={VISUALS.landscape} alt="Landscape cyberpunk Noty Nyto" />
-            <img className="visual" src={VISUALS.split} alt="Split face Nyto Noty" />
-            <img className="visual" src={VISUALS.portrait} alt="Portrait Noty fond blanc" />
+      {activeTrack && (
+        <aside className={`mini-player ${isPlaying ? 'mini-player--playing' : ''}`} aria-label="Mini lecteur">
+          {activeTrack.coverUrl ? <img src={activeTrack.coverUrl} alt="" aria-hidden /> : <div className="cover--empty" />}
+          <div className="mini-player__meta">
+            <strong>{activeTrack.title}</strong>
+            <small>{activeTrack.artist}</small>
           </div>
-        </section>
+          <div className="mini-player__actions">
+            <button type="button" aria-label="Mini piste precedente" onClick={() => goToRelativeTrack(-1)}>
+              ◁
+            </button>
+            <button type="button" aria-label="Mini lecture pause" onClick={() => void handlePlayPause()}>
+              {isPlaying ? '❚❚' : '▷'}
+            </button>
+            <button type="button" aria-label="Mini piste suivante" onClick={() => goToRelativeTrack(1)}>
+              ▷
+            </button>
+          </div>
+        </aside>
       )}
 
-      {isDownloadModalOpen && (
+      {isDownloadModalOpen && activeTrack && (
         <div className="modal-backdrop" role="presentation" onClick={() => setIsDownloadModalOpen(false)}>
           <section
             className="modal"
             role="dialog"
             aria-modal="true"
-            aria-label="Conditions de telechargement"
+            aria-label="Conditions d utilisation"
             onClick={(event) => event.stopPropagation()}
           >
-            <h3 className="modal-title">Telechargement gratuit</h3>
+            <h3 className="modal-title">Sons publics Suno</h3>
             <p className="modal-text">
-              Les musiques sont fournies a titre gratuit. Si tu veux soutenir l&apos;artiste, suis-moi sur Instagram,
-              YouTube et Suno.
+              Ce lecteur indexe uniquement les sons publics. Le cache local sert a une ecoute personnelle hors ligne.
             </p>
             <p className="modal-text modal-text--warning">
-              Les sons sont proteges par la licence Suno. Toute exploitation commerciale est interdite et peut
-              entrainer des poursuites.
+              Toute exploitation commerciale reste soumise aux conditions Suno. Ce projet n&apos;est pas affilie a Suno.
             </p>
-
-            <div className="modal-links">
-              <a href="https://suno.com/@noty2686" target="_blank" rel="noreferrer">
-                Suno
-              </a>
-              <a href="https://instagram.com/" target="_blank" rel="noreferrer">
-                Instagram
-              </a>
-              <a href="https://youtube.com/" target="_blank" rel="noreferrer">
-                YouTube
-              </a>
-            </div>
-
             <div className="modal-actions">
               <button type="button" className="btn" onClick={() => setIsDownloadModalOpen(false)}>
                 Fermer
               </button>
-              <a
-                className="btn btn--primary"
-                href={activeTrack.audioUrl}
-                download={downloadName}
-                onClick={() => setIsDownloadModalOpen(false)}
-              >
-                Telecharger quand meme
+              <a className="btn btn--primary" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
+                Ouvrir la page Suno
               </a>
             </div>
           </section>
         </div>
       )}
-
-      <aside className={`mini-player ${isPlaying ? 'mini-player--playing' : ''}`} aria-label="Mini lecteur mobile">
-        <img src={activeTrack.coverUrl} alt="" aria-hidden />
-        <div className="mini-player__meta">
-          <strong>{activeTrack.title}</strong>
-          <small>{activeTrack.artist}</small>
-        </div>
-        <div className="mini-player__actions">
-          <button type="button" aria-label="Mini piste precedente" onClick={() => goToPreviousTrack()}>
-            ◁
-          </button>
-          <button type="button" aria-label="Mini lecture pause" onClick={handlePlayPause}>
-            {isPlaying ? '❚❚' : '▷'}
-          </button>
-          <button type="button" aria-label="Mini piste suivante" onClick={() => goToNextTrack()}>
-            ▷
-          </button>
-        </div>
-      </aside>
     </main>
   )
 }
@@ -726,10 +743,16 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 function formatTime(value: number): string {
-  if (!Number.isFinite(value)) return '00:00'
+  if (!Number.isFinite(value) || value < 0) return '00:00'
   const minutes = Math.floor(value / 60)
   const seconds = Math.floor(value % 60)
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export default App

@@ -9,7 +9,7 @@ export interface SharePayload {
 export function buildSharePayload(track: Track, url: string): SharePayload {
   return {
     title: `${track.artist} - ${track.title}`,
-    text: `Decouvre ${track.title} (${track.genre}) dans mon univers Noty x Nyto.`,
-    url,
+    text: `Ecoute ${track.title} sur Suno (@${track.handle}).`,
+    url: track.sunoUrl || url,
   }
 }
