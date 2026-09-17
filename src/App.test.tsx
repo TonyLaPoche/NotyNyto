@@ -16,7 +16,7 @@ const catalog = {
       title: 'Grande Soeur',
       artist: 'Noty',
       handle: 'noty2686',
-      audioUrl: 'https://cdn/t1.m4a',
+      audioUrl: 'https://cdn1.suno.ai/t1.mp4',
       coverUrl: 'https://cdn/t1.jpg',
       duration: 120,
       tags: 'hyperpop',
@@ -28,7 +28,7 @@ const catalog = {
       title: 'Independante',
       artist: 'Noty',
       handle: 'noty2686',
-      audioUrl: 'https://cdn/t2.m4a',
+      audioUrl: 'https://cdn1.suno.ai/t2.mp4',
       coverUrl: '',
       duration: 90,
       tags: '',
@@ -71,28 +71,32 @@ describe('App', () => {
       configurable: true,
       value: vi.fn(),
     })
+    Object.defineProperty(HTMLMediaElement.prototype, 'load', {
+      configurable: true,
+      value: vi.fn(),
+    })
   })
 
   it('charge la demo et permet de jouer un titre', async () => {
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Lecteur multi-artistes' })).toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: 'Grande Soeur' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Ecoute publique, cache local' })).toBeInTheDocument()
+    expect(await screen.findByText('Grande Soeur')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'PLAY' }))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'PAUSE' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Lecture' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Voir les lyrics' }))
-    expect(screen.getByRole('button', { name: 'Masquer les lyrics' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Lyrics' }))
+    expect(screen.getByRole('button', { name: 'Masquer lyrics' })).toBeInTheDocument()
   })
 
   it('navigue bibliotheque et scanne un artiste', async () => {
     render(<App />)
-    await screen.findByRole('heading', { name: 'Grande Soeur' })
+    await screen.findByText('Grande Soeur')
 
     fireEvent.click(screen.getByRole('link', { name: 'Bibliotheque' }))
     fireEvent(window, new HashChangeEvent('hashchange'))
-    expect(await screen.findByRole('heading', { name: 'Bibliotheque locale' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Bibliotheque' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('link', { name: 'Accueil' }))
     fireEvent(window, new HashChangeEvent('hashchange'))
@@ -101,6 +105,6 @@ describe('App', () => {
       target: { value: 'https://suno.com/@noty2686?page=songs' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Scanner' }))
-    await waitFor(() => expect(screen.getByText(/sons publics trouves/i)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/sons pour @noty2686/i)).toBeInTheDocument())
   })
 })

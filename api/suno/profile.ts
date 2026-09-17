@@ -1,6 +1,6 @@
 const HANDLE_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/
 
-type MediaUrl = { url?: string; content_type?: string }
+type MediaUrl = { url?: string; content_type?: string; encoding?: string }
 type Clip = {
   id?: string
   title?: string
@@ -9,8 +9,19 @@ type Clip = {
   is_public?: boolean
   image_url?: string
   display_tags?: string
+  video_url?: string
   media_urls?: MediaUrl[]
   metadata?: { duration?: number; prompt?: string }
+}
+
+function isBrowserPlayableAudioUrl(url: string): boolean {
+  if (!url || url.includes('/api/forbidden')) return false
+  if (/cloudfront\.net\/.+\/clip\/.+\.m4a(\?|$)/i.test(url)) return false
+  return true
+}
+
+function fallbackMp4Url(trackId: string): string {
+  return `https://cdn1.suno.ai/${trackId}.mp4`
 }
 
 function parseHandle(raw: string): string | null {
@@ -38,11 +49,23 @@ function parseHandle(raw: string): string | null {
 }
 
 function pickAudioUrl(clip: Clip): string | null {
+  const videoUrl = clip.video_url?.trim()
+  if (videoUrl && isBrowserPlayableAudioUrl(videoUrl)) {
+    return videoUrl
+  }
+
   const urls = clip.media_urls ?? []
-  const preferred =
-    urls.find((item) => item.url && (item.content_type?.includes('m4a') || item.url.endsWith('.m4a'))) ??
-    urls.find((item) => Boolean(item.url))
-  return preferred?.url ?? null
+  const progressive =
+    urls.find(
+      (item) =>
+        item.url &&
+        isBrowserPlayableAudioUrl(item.url) &&
+        !String(item.content_type ?? '').includes('opus'),
+    ) ?? urls.find((item) => item.url && isBrowserPlayableAudioUrl(item.url))
+
+  if (progressive?.url) return progressive.url
+  if (clip.id) return fallbackMp4Url(clip.id)
+  return null
 }
 
 function mapProfile(raw: unknown) {

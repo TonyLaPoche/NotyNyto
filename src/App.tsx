@@ -22,6 +22,13 @@ import { shareTrack } from './application/usecases/shareTrack'
 type Page = 'home' | 'library' | 'artist'
 type RepeatMode = 'off' | 'all' | 'one'
 
+interface DownloadProgress {
+  label: string
+  percent: number
+  current: number
+  total: number
+}
+
 function App() {
   const [page, setPage] = useState<Page>('home')
   const [query, setQuery] = useState('')
@@ -40,8 +47,9 @@ function App() {
   const [playableUrl, setPlayableUrl] = useState<string | null>(null)
   const [cachedIds, setCachedIds] = useState<string[]>([])
   const [cacheBytes, setCacheBytes] = useState(0)
-  const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false)
   const [isLyricsExpanded, setIsLyricsExpanded] = useState(false)
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
+  const [trackDownloadPercent, setTrackDownloadPercent] = useState<Record<string, number>>({})
   const [networkQuality, setNetworkQuality] = useState(() => readBrowserNetworkQuality())
 
   const installPromptRef = useRef<BeforeInstallPromptEvent | null>(null)
@@ -52,6 +60,8 @@ function App() {
   const tracks = useMemo(() => activeCatalog?.tracks ?? [], [activeCatalog])
   const activeTrack = tracks.find((track) => track.id === activeTrackId) ?? tracks[0] ?? null
   const currentTrackIndex = activeTrack ? tracks.findIndex((track) => track.id === activeTrack.id) : -1
+  const cachedCount = tracks.filter((track) => cachedIds.includes(track.id)).length
+  const installPercent = tracks.length ? Math.round((cachedCount / tracks.length) * 100) : 0
 
   const appStyle = useMemo(
     () => ({ '--play-progress': duration ? String(currentTime / duration) : '0' }) as CSSProperties,
@@ -94,9 +104,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const refreshNetwork = () => {
-      setNetworkQuality(readBrowserNetworkQuality())
-    }
+    const refreshNetwork = () => setNetworkQuality(readBrowserNetworkQuality())
     window.addEventListener('online', refreshNetwork)
     window.addEventListener('offline', refreshNetwork)
     return () => {
@@ -145,11 +153,18 @@ function App() {
   /* c8 ignore end */
 
   useEffect(() => {
-    if (!shouldAutoplayRef.current || !playableUrl) return
     const audio = audioRef.current
-    if (!audio) return
+    if (!audio || !playableUrl) return
+    audio.load()
+    if (!shouldAutoplayRef.current) return
     shouldAutoplayRef.current = false
-    void audio.play().catch(() => setIsPlaying(false))
+    void audio
+      .play()
+      .then(() => setIsPlaying(true))
+      .catch(() => {
+        setIsPlaying(false)
+        setError('Lecture bloquee par le navigateur. Reessaie via PLAY.')
+      })
   }, [playableUrl, activeTrackId])
 
   useEffect(() => {
@@ -176,7 +191,7 @@ function App() {
         setLibrary(nextLibrary)
         setActiveCatalog(catalog)
         setActiveTrackId(catalog.tracks[0]?.id ?? null)
-        setStatusMessage(`Demo chargee: @${catalog.artist.handle} (${catalog.tracks.length} sons publics)`)
+        setStatusMessage(`Demo prete: @${catalog.artist.handle}`)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Impossible de charger la demo')
       } finally {
@@ -259,7 +274,7 @@ function App() {
       setActiveTrackId(catalog.tracks[0]?.id ?? null)
       setPage('artist')
       window.location.hash = `/artist/${catalog.artist.handle}`
-      setStatusMessage(`${catalog.tracks.length} sons publics trouves pour @${catalog.artist.handle}`)
+      setStatusMessage(`${catalog.tracks.length} sons pour @${catalog.artist.handle}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Scan impossible')
     } finally {
@@ -280,6 +295,10 @@ function App() {
     if (activeCatalog?.artist.handle === handle) {
       setActiveCatalog(next[0] ?? null)
       setActiveTrackId(next[0]?.tracks[0]?.id ?? null)
+      if (!next[0]) {
+        setPage('home')
+        window.location.hash = '#/'
+      }
     }
   }
 
@@ -295,12 +314,17 @@ function App() {
   const handlePlayPause = async () => {
     const audio = audioRef.current
     if (!audio) return
+    if (!playableUrl) {
+      setError('Audio en cours de preparation...')
+      return
+    }
     if (audio.paused) {
       try {
         await audio.play()
         setIsPlaying(true)
+        setError(null)
       } catch {
-        return
+        setError('Impossible de lancer la lecture. Reessaie.')
       }
       return
     }
@@ -320,6 +344,7 @@ function App() {
     shouldAutoplayRef.current = autoplay
     setActiveTrackId(track.id)
     setIsLyricsExpanded(false)
+    setError(null)
   }
 
   const goToRelativeTrack = (delta: number, autoplay = isPlaying) => {
@@ -337,13 +362,25 @@ function App() {
       setError('Reseau insuffisant pour telecharger. Passe en Wi-Fi ou 4G.')
       return
     }
-    setStatusMessage(`Telechargement: ${track.title}`)
+    setTrackDownloadPercent((prev) => ({ ...prev, [track.id]: 0 }))
     try {
-      await cacheTrackAudio(track.id, track.audioUrl)
+      await cacheTrackAudio(track.id, track.audioUrl, fetch, (percent) => {
+        setTrackDownloadPercent((prev) => ({ ...prev, [track.id]: percent }))
+      })
       await refreshCacheState()
-      setStatusMessage(`${track.title} disponible hors ligne`)
+      setStatusMessage(`${track.title} installe en local`)
+      setTrackDownloadPercent((prev) => {
+        const next = { ...prev }
+        delete next[track.id]
+        return next
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Telechargement impossible')
+      setTrackDownloadPercent((prev) => {
+        const next = { ...prev }
+        delete next[track.id]
+        return next
+      })
     }
   }
 
@@ -353,24 +390,58 @@ function App() {
       setError('Reseau insuffisant pour tout telecharger.')
       return
     }
-    setIsLoading(true)
+    const pending = activeCatalog.tracks.filter((track) => !cachedIds.includes(track.id))
+    if (pending.length === 0) {
+      setStatusMessage('Deja installe a 100% en local')
+      return
+    }
+
+    setDownloadProgress({ label: pending[0].title, percent: 0, current: 0, total: pending.length })
     try {
-      for (const track of activeCatalog.tracks) {
-        if (cachedIds.includes(track.id)) continue
-        await cacheTrackAudio(track.id, track.audioUrl)
+      for (let index = 0; index < pending.length; index += 1) {
+        const track = pending[index]
+        setDownloadProgress({
+          label: track.title,
+          percent: Math.round((index / pending.length) * 100),
+          current: index,
+          total: pending.length,
+        })
+        await cacheTrackAudio(track.id, track.audioUrl, fetch, (filePercent) => {
+          const overall = Math.round(((index + filePercent / 100) / pending.length) * 100)
+          setDownloadProgress({
+            label: track.title,
+            percent: overall,
+            current: index + 1,
+            total: pending.length,
+          })
+          setTrackDownloadPercent((prev) => ({ ...prev, [track.id]: filePercent }))
+        })
+        setTrackDownloadPercent((prev) => {
+          const next = { ...prev }
+          delete next[track.id]
+          return next
+        })
       }
       await refreshCacheState()
-      setStatusMessage(`Cache local pret pour @${activeCatalog.artist.handle}`)
+      setDownloadProgress({
+        label: 'Termine',
+        percent: 100,
+        current: pending.length,
+        total: pending.length,
+      })
+      setStatusMessage(`Installation locale: 100% pour @${activeCatalog.artist.handle}`)
+      window.setTimeout(() => setDownloadProgress(null), 1800)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Telechargement impossible')
-    } finally {
-      setIsLoading(false)
+      setDownloadProgress(null)
     }
   }
 
   const wipeCache = async () => {
     await clearCachedAudio()
     await refreshCacheState()
+    setTrackDownloadPercent({})
+    setDownloadProgress(null)
     setStatusMessage('Cache audio vide')
   }
 
@@ -393,24 +464,26 @@ function App() {
         >
           Bibliotheque
         </a>
-        {activeCatalog && (
-          <a
-            href={`#/artist/${activeCatalog.artist.handle}`}
-            className={`nav-link ${page === 'artist' ? 'nav-link--active' : ''}`}
-            onClick={() => setPage('artist')}
-          >
-            Artiste
-          </a>
-        )}
       </nav>
 
-      <header className="hero">
-        <p className="label">Suno Public Player</p>
-        <h1>Lecteur multi-artistes</h1>
-        <p className="subtitle">
-          Scanne un profil public Suno, ecoute en stream, telecharge localement si le reseau le permet.
-        </p>
-        <p className="disclaimer">Sons publics uniquement · non affilie a Suno · usage personnel</p>
+      <header className="topbar">
+        <div className="brand-block">
+          <p className="label">Suno Public Player</p>
+          {page === 'home' ? (
+            <>
+              <h1>Ecoute publique, cache local</h1>
+              <p className="subtitle">Scanne un profil Suno, joue, puis installe hors ligne.</p>
+            </>
+          ) : (
+            <h1 className="topbar-title">
+              {page === 'library'
+                ? 'Bibliotheque'
+                : activeCatalog
+                  ? activeCatalog.artist.displayName
+                  : 'Artiste'}
+            </h1>
+          )}
+        </div>
 
         <form
           className="search-bar"
@@ -426,7 +499,7 @@ function App() {
             id="artist-search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="@handle ou https://suno.com/@artiste"
+            placeholder="@handle ou URL Suno"
             aria-label="Chercher un artiste Suno"
           />
           <button type="submit" className="btn btn--primary" disabled={isLoading}>
@@ -435,166 +508,45 @@ function App() {
         </form>
 
         <div className="meta-row">
-          <span className={`network-pill network-pill--${networkQuality}`}>Reseau: {networkQuality}</span>
-          <span className="cache-pill">Cache: {formatBytes(cacheBytes)}</span>
+          <span className={`network-pill network-pill--${networkQuality}`}>Reseau {networkQuality}</span>
+          <span className="cache-pill">Cache {formatBytes(cacheBytes)}</span>
+          {page === 'artist' && activeCatalog && (
+            <span className="cache-pill cache-pill--progress">Local {installPercent}%</span>
+          )}
           {canInstall && (
             <button type="button" className="btn" onClick={handleInstall}>
               Installer l&apos;app
             </button>
           )}
           <button type="button" className="btn" onClick={() => void wipeCache()}>
-            Vider le cache
+            Vider cache
           </button>
         </div>
 
         {error && <p className="banner banner--error">{error}</p>}
         {statusMessage && <p className="banner banner--ok">{statusMessage}</p>}
         {isLoading && <p className="banner">Chargement...</p>}
+
+        {downloadProgress && (
+          <div className="progress-block" aria-live="polite">
+            <div className="progress-block__meta">
+              <strong>Installation locale {downloadProgress.percent}%</strong>
+              <span>
+                {downloadProgress.current}/{downloadProgress.total} · {downloadProgress.label}
+              </span>
+            </div>
+            <div className="progress-bar" role="progressbar" aria-valuenow={downloadProgress.percent} aria-valuemin={0} aria-valuemax={100}>
+              <div className="progress-bar__fill" style={{ width: `${downloadProgress.percent}%` }} />
+            </div>
+          </div>
+        )}
       </header>
-
-      {activeTrack && (
-        <section className={`player-panel ${isPlaying ? 'player-panel--playing' : ''}`}>
-          <div className="player-panel__top">
-            {activeTrack.coverUrl ? (
-              <img className="cover" src={activeTrack.coverUrl} alt={`Pochette ${activeTrack.title}`} />
-            ) : (
-              <div className="cover cover--empty" aria-hidden />
-            )}
-            <div className="meta">
-              <p className="label">Now playing</p>
-              <h2>{activeTrack.title}</h2>
-              <p>
-                {activeTrack.artist} · @{activeTrack.handle}
-              </p>
-              <p className="genre">{activeTrack.tags || 'Public Suno track'}</p>
-              <div className="meta__status">
-                <span className={`status-pill ${isPlaying ? 'status-pill--playing' : ''}`}>
-                  {isPlaying ? 'En lecture' : 'En pause'}
-                </span>
-                <span className="meta__time">
-                  {formatTime(currentTime)} / {formatTime(duration)}
-                </span>
-                {cachedIds.includes(activeTrack.id) && <span className="status-pill">Hors ligne</span>}
-              </div>
-            </div>
-          </div>
-
-          <div className="transport">
-            <button type="button" className="transport-btn" onClick={() => goToRelativeTrack(-1)}>
-              PREV
-            </button>
-            <button type="button" className="player-btn" onClick={() => void handlePlayPause()}>
-              {isPlaying ? 'PAUSE' : 'PLAY'}
-            </button>
-            <button type="button" className="transport-btn" onClick={() => goToRelativeTrack(1)}>
-              NEXT
-            </button>
-            <button
-              type="button"
-              className={`repeat-btn ${repeatMode !== 'off' ? 'repeat-btn--active' : ''}`}
-              onClick={cycleRepeatMode}
-            >
-              {repeatMode === 'off' ? 'REP OFF' : repeatMode === 'all' ? 'REP ALL' : 'REP 1'}
-            </button>
-          </div>
-
-          <input
-            className="player-seek"
-            type="range"
-            min={0}
-            max={duration || 1}
-            value={currentTime}
-            aria-label="Progression du morceau"
-            onChange={(event) => handleSeek(Number(event.target.value))}
-          />
-
-          <div className="volume-control">
-            <label htmlFor="volume-range">Volume</label>
-            <input
-              id="volume-range"
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(event) => setVolume(Number(event.target.value))}
-              aria-label="Volume"
-            />
-            <span>{Math.round(volume * 100)}%</span>
-          </div>
-
-          <audio
-            ref={audioRef}
-            className="audio-element"
-            preload="metadata"
-            src={playableUrl ?? undefined}
-            aria-label="Lecteur audio principal"
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-            onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || activeTrack.duration || 0)}
-            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
-            onEnded={() => {
-              if (repeatMode === 'one') {
-                const audio = audioRef.current
-                if (audio) {
-                  audio.currentTime = 0
-                  void audio.play()
-                }
-                return
-              }
-              if (repeatMode === 'all') {
-                goToRelativeTrack(1, true)
-                return
-              }
-              setIsPlaying(false)
-              setCurrentTime(0)
-            }}
-          />
-
-          <div className="actions">
-            <button type="button" className="btn btn--primary" onClick={() => void shareTrack(activeTrack)}>
-              Partager
-            </button>
-            <button type="button" className="btn btn--secondary" onClick={() => setIsDownloadModalOpen(true)}>
-              Lien Suno / licence
-            </button>
-            <button type="button" className="btn" onClick={() => void downloadTrack(activeTrack)}>
-              Telecharger local
-            </button>
-            <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
-              Ouvrir sur Suno
-            </a>
-          </div>
-
-          <button
-            type="button"
-            className="lyrics-toggle"
-            aria-expanded={isLyricsExpanded}
-            aria-controls="lyrics-accordion"
-            onClick={() => setIsLyricsExpanded((previous) => !previous)}
-          >
-            {isLyricsExpanded ? 'Masquer les lyrics' : 'Voir les lyrics'}
-          </button>
-          <section
-            id="lyrics-accordion"
-            className={`lyrics-accordion ${isLyricsExpanded ? 'lyrics-accordion--open' : ''}`}
-            aria-label="Lyrics du son en cours"
-            aria-hidden={!isLyricsExpanded}
-          >
-            <div className="lyrics-panel">
-              <h3 className="lyrics-title">Lyrics</h3>
-              <pre className="lyrics-content">{activeTrack.lyrics || 'Lyrics indisponibles pour ce son public.'}</pre>
-            </div>
-          </section>
-        </section>
-      )}
 
       {page === 'home' && (
         <section className="panel" aria-label="Demarrer">
-          <h3 className="section-title">Commencer</h3>
+          <h2 className="section-title">Demarrer</h2>
           <p className="section-subtitle">
-            Colle une URL du type <code>https://suno.com/@noty2686?page=songs</code> ou un handle. Seuls les sons
-            publics sont indexes.
+            Exemple: <code>@{DEMO_ARTIST_HANDLE}</code> ou une URL <code>suno.com/@…</code>
           </p>
           <div className="home-actions">
             <button
@@ -602,21 +554,30 @@ function App() {
               className="btn btn--primary"
               onClick={() => void handleScanArtist(DEMO_ARTIST_HANDLE)}
             >
-              Recharger la demo @{DEMO_ARTIST_HANDLE}
+              Charger @{DEMO_ARTIST_HANDLE}
             </button>
             {library[0] && (
               <button type="button" className="btn" onClick={() => openArtist(library[0])}>
-                Ouvrir {library[0].artist.displayName}
+                Continuer avec {library[0].artist.displayName}
               </button>
             )}
           </div>
+
+          {library.length > 0 && (
+            <div className="quick-artists" aria-label="Artistes recents">
+              {library.slice(0, 4).map((catalog) => (
+                <button key={catalog.artist.handle} type="button" className="chip" onClick={() => openArtist(catalog)}>
+                  @{catalog.artist.handle}
+                </button>
+              ))}
+            </div>
+          )}
         </section>
       )}
 
       {page === 'library' && (
         <section className="panel" aria-label="Bibliotheque locale">
-          <h3 className="section-title">Bibliotheque locale</h3>
-          <p className="section-subtitle">Artistes scannes et conserves dans localStorage.</p>
+          <p className="section-subtitle">Artistes scannes conserves sur cet appareil.</p>
           <div className="artist-list">
             {library.length === 0 && <p>Aucun artiste pour le moment.</p>}
             {library.map((catalog) => (
@@ -651,87 +612,153 @@ function App() {
             ) : (
               <div className="artist-avatar avatar-fallback" aria-hidden />
             )}
-            <div>
-              <h3 className="section-title">{activeCatalog.artist.displayName}</h3>
+            <div className="artist-header__copy">
               <p className="section-subtitle">
-                @{activeCatalog.artist.handle} · {activeCatalog.tracks.length} sons publics
+                @{activeCatalog.artist.handle} · {activeCatalog.tracks.length} sons · {cachedCount} en local
               </p>
+              <div className="progress-bar progress-bar--inline" aria-hidden>
+                <div className="progress-bar__fill" style={{ width: `${installPercent}%` }} />
+              </div>
               <a href={`https://suno.com/@${activeCatalog.artist.handle}?page=songs`} target="_blank" rel="noreferrer">
-                Voir sur Suno
+                Profil Suno
               </a>
             </div>
-            <button type="button" className="btn btn--primary" onClick={() => void downloadAll()}>
-              Tout telecharger
+            <button type="button" className="btn btn--primary" onClick={() => void downloadAll()} disabled={Boolean(downloadProgress)}>
+              Installer local ({installPercent}%)
             </button>
           </div>
 
           <div className="songs-list">
-            {activeCatalog.tracks.map((track, index) => (
-              <button
-                key={track.id}
-                type="button"
-                className={`song-row ${track.id === activeTrack?.id ? 'song-row--active' : ''}`}
-                onClick={() => selectTrack(track, true)}
-              >
-                <span className="song-rank">#{index + 1}</span>
-                <span className="song-title">{track.title}</span>
-                <span className="song-artist">
-                  {formatTime(track.duration)}
-                  {cachedIds.includes(track.id) ? ' · local' : ''}
-                </span>
-              </button>
-            ))}
+            {activeCatalog.tracks.map((track, index) => {
+              const percent = trackDownloadPercent[track.id]
+              const isCached = cachedIds.includes(track.id)
+              return (
+                <div
+                  key={track.id}
+                  className={`song-row ${track.id === activeTrack?.id ? 'song-row--active' : ''}`}
+                >
+                  <button type="button" className="song-row__main" onClick={() => selectTrack(track, true)}>
+                    <span className="song-rank">#{index + 1}</span>
+                    <span className="song-title">{track.title}</span>
+                    <span className="song-artist">
+                      {formatTime(track.duration)}
+                      {isCached ? ' · local' : percent != null ? ` · ${percent}%` : ''}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="song-cache-btn"
+                    onClick={() => void downloadTrack(track)}
+                    disabled={isCached || percent != null}
+                    aria-label={isCached ? `${track.title} deja local` : `Telecharger ${track.title}`}
+                  >
+                    {isCached ? 'OK' : percent != null ? `${percent}%` : '↓'}
+                  </button>
+                  {percent != null && (
+                    <div className="song-row__progress" aria-hidden>
+                      <div style={{ width: `${percent}%` }} />
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </section>
       )}
 
       {activeTrack && (
-        <aside className={`mini-player ${isPlaying ? 'mini-player--playing' : ''}`} aria-label="Mini lecteur">
+        <aside className={`player-bar ${isPlaying ? 'player-bar--playing' : ''}`} aria-label="Lecteur">
           {activeTrack.coverUrl ? <img src={activeTrack.coverUrl} alt="" aria-hidden /> : <div className="cover--empty" />}
-          <div className="mini-player__meta">
+          <div className="player-bar__meta">
             <strong>{activeTrack.title}</strong>
-            <small>{activeTrack.artist}</small>
+            <small>
+              {activeTrack.artist} · {formatTime(currentTime)} / {formatTime(duration)}
+              {cachedIds.includes(activeTrack.id) ? ' · local' : ''}
+            </small>
           </div>
-          <div className="mini-player__actions">
-            <button type="button" aria-label="Mini piste precedente" onClick={() => goToRelativeTrack(-1)}>
+          <div className="player-bar__controls">
+            <button type="button" aria-label="Piste precedente" onClick={() => goToRelativeTrack(-1)}>
               ◁
             </button>
-            <button type="button" aria-label="Mini lecture pause" onClick={() => void handlePlayPause()}>
+            <button type="button" className="player-bar__play" aria-label={isPlaying ? 'Pause' : 'Lecture'} onClick={() => void handlePlayPause()}>
               {isPlaying ? '❚❚' : '▷'}
             </button>
-            <button type="button" aria-label="Mini piste suivante" onClick={() => goToRelativeTrack(1)}>
+            <button type="button" aria-label="Piste suivante" onClick={() => goToRelativeTrack(1)}>
               ▷
             </button>
+            <button
+              type="button"
+              className={repeatMode !== 'off' ? 'repeat-btn--active' : ''}
+              aria-label="Mode repetition"
+              onClick={cycleRepeatMode}
+            >
+              {repeatMode === 'off' ? '1×' : repeatMode === 'all' ? '∞' : '1'}
+            </button>
           </div>
+          <input
+            className="player-seek"
+            type="range"
+            min={0}
+            max={duration || 1}
+            value={currentTime}
+            aria-label="Progression du morceau"
+            onChange={(event) => handleSeek(Number(event.target.value))}
+          />
+          <div className="player-bar__extra">
+            <label className="volume-inline">
+              <span className="sr-only">Volume</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={volume}
+                onChange={(event) => setVolume(Number(event.target.value))}
+                aria-label="Volume"
+              />
+            </label>
+            <button type="button" className="btn" onClick={() => void shareTrack(activeTrack)}>
+              Partager
+            </button>
+            <button type="button" className="btn" onClick={() => setIsLyricsExpanded((v) => !v)}>
+              {isLyricsExpanded ? 'Masquer lyrics' : 'Lyrics'}
+            </button>
+            <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
+              Suno
+            </a>
+          </div>
+          {isLyricsExpanded && (
+            <pre className="player-bar__lyrics">{activeTrack.lyrics || 'Lyrics indisponibles.'}</pre>
+          )}
+          <audio
+            ref={audioRef}
+            className="audio-element"
+            preload="metadata"
+            src={playableUrl ?? undefined}
+            aria-label="Lecteur audio principal"
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || activeTrack.duration || 0)}
+            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onError={() => setError('Source audio illisible. Rescanne l artiste ou reessaie.')}
+            onEnded={() => {
+              if (repeatMode === 'one') {
+                const audio = audioRef.current
+                if (audio) {
+                  audio.currentTime = 0
+                  void audio.play()
+                }
+                return
+              }
+              if (repeatMode === 'all') {
+                goToRelativeTrack(1, true)
+                return
+              }
+              setIsPlaying(false)
+              setCurrentTime(0)
+            }}
+          />
         </aside>
-      )}
-
-      {isDownloadModalOpen && activeTrack && (
-        <div className="modal-backdrop" role="presentation" onClick={() => setIsDownloadModalOpen(false)}>
-          <section
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Conditions d utilisation"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h3 className="modal-title">Sons publics Suno</h3>
-            <p className="modal-text">
-              Ce lecteur indexe uniquement les sons publics. Le cache local sert a une ecoute personnelle hors ligne.
-            </p>
-            <p className="modal-text modal-text--warning">
-              Toute exploitation commerciale reste soumise aux conditions Suno. Ce projet n&apos;est pas affilie a Suno.
-            </p>
-            <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setIsDownloadModalOpen(false)}>
-                Fermer
-              </button>
-              <a className="btn btn--primary" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
-                Ouvrir la page Suno
-              </a>
-            </div>
-          </section>
-        </div>
       )}
     </main>
   )

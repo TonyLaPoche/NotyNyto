@@ -1,3 +1,5 @@
+import { toPlayableAudioUrl } from '../adapters/sunoProfileAdapter'
+
 const DB_NAME = 'suno-public-player-audio'
 const STORE_NAME = 'tracks'
 const DB_VERSION = 1
@@ -34,21 +36,63 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   })
 }
 
+async function readResponseBuffer(
+  response: Response,
+  onProgress?: (percent: number) => void,
+): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
+  const headerType = response.headers?.get?.('content-type') ?? ''
+  const total = Number(response.headers?.get?.('content-length') || 0)
+
+  if (response.body && total > 0 && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
+    let received = 0
+
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      chunks.push(value)
+      received += value.byteLength
+      onProgress?.(Math.min(99, Math.round((received / total) * 100)))
+    }
+
+    const merged = new Uint8Array(received)
+    let offset = 0
+    for (const chunk of chunks) {
+      merged.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+
+    onProgress?.(100)
+    return { buffer: merged.buffer, mimeType: headerType || 'audio/mp4' }
+  }
+
+  const blob = await response.blob()
+  onProgress?.(100)
+  return {
+    buffer: await blob.arrayBuffer(),
+    mimeType: headerType || blob.type || 'audio/mp4',
+  }
+}
+
 export async function cacheTrackAudio(
   trackId: string,
   audioUrl: string,
   fetcher: typeof fetch = fetch,
+  onProgress?: (percent: number) => void,
 ): Promise<CachedAudioRecord> {
-  const response = await fetcher(audioUrl)
+  const playableUrl = toPlayableAudioUrl(trackId, audioUrl)
+  const response = await fetcher(playableUrl)
   if (!response.ok) {
     throw new Error('Telechargement audio impossible')
   }
-  const blob = await response.blob()
-  const buffer = await blob.arrayBuffer()
+
+  const { buffer, mimeType } = await readResponseBuffer(response, onProgress)
   const record: CachedAudioRecord = {
     trackId,
     buffer,
-    mimeType: blob.type || 'audio/mp4',
+    mimeType,
     cachedAt: new Date().toISOString(),
     byteLength: buffer.byteLength,
   }
@@ -122,5 +166,5 @@ export async function resolvePlayableUrl(trackId: string, remoteUrl: string): Pr
   if (cached) {
     return URL.createObjectURL(new Blob([cached.buffer], { type: cached.mimeType }))
   }
-  return remoteUrl
+  return toPlayableAudioUrl(trackId, remoteUrl)
 }

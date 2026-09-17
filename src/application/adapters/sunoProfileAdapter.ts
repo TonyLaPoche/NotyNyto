@@ -3,6 +3,7 @@ import type { Artist, ArtistCatalog, Track } from '../../domain/entities/track'
 interface SunoMediaUrl {
   url?: string
   content_type?: string
+  encoding?: string
 }
 
 interface SunoClip {
@@ -13,6 +14,7 @@ interface SunoClip {
   is_public?: boolean
   image_url?: string
   display_tags?: string
+  video_url?: string
   media_urls?: SunoMediaUrl[]
   metadata?: {
     duration?: number
@@ -28,12 +30,40 @@ interface SunoProfileResponse {
   clips?: SunoClip[]
 }
 
+/** Les streams m4a-opus encodes Suno ne sont pas lisibles dans un <audio> navigateur. */
+export function isBrowserPlayableAudioUrl(url: string): boolean {
+  if (!url || url.includes('/api/forbidden')) return false
+  if (/cloudfront\.net\/.+\/clip\/.+\.m4a(\?|$)/i.test(url)) return false
+  return true
+}
+
+export function fallbackMp4Url(trackId: string): string {
+  return `https://cdn1.suno.ai/${trackId}.mp4`
+}
+
+export function toPlayableAudioUrl(trackId: string, audioUrl: string): string {
+  if (isBrowserPlayableAudioUrl(audioUrl)) return audioUrl
+  return fallbackMp4Url(trackId)
+}
+
 function pickAudioUrl(clip: SunoClip): string | null {
+  const videoUrl = clip.video_url?.trim()
+  if (videoUrl && isBrowserPlayableAudioUrl(videoUrl)) {
+    return videoUrl
+  }
+
   const urls = clip.media_urls ?? []
-  const preferred =
-    urls.find((item) => item.url && (item.content_type?.includes('m4a') || item.url.endsWith('.m4a'))) ??
-    urls.find((item) => Boolean(item.url))
-  return preferred?.url ?? null
+  const progressive =
+    urls.find(
+      (item) =>
+        item.url &&
+        isBrowserPlayableAudioUrl(item.url) &&
+        !String(item.content_type ?? '').includes('opus'),
+    ) ?? urls.find((item) => item.url && isBrowserPlayableAudioUrl(item.url))
+
+  if (progressive?.url) return progressive.url
+  if (clip.id) return fallbackMp4Url(clip.id)
+  return null
 }
 
 function mapClip(clip: SunoClip, fallbackHandle: string, fallbackArtist: string): Track | null {
