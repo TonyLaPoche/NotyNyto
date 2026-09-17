@@ -315,6 +315,121 @@ h1 {
   font: inherit;
 }
 
+.chip--active {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.filter-chips,
+.segmented {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.segmented button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 7px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.segmented--active {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent) !important;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+}
+
+.artist-header__actions,
+.row-actions,
+.song-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.playlist-create {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+.playlist-create input {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  padding: 12px 14px;
+  font: inherit;
+}
+
+.playlist-picker-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.modal-check {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 8, 14, 0.72);
+  backdrop-filter: blur(4px);
+  padding: 14px;
+}
+
+.modal {
+  width: min(640px, 100%);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: #121924;
+  padding: 18px;
+}
+
+.modal-title {
+  margin: 0 0 8px;
+}
+
+.modal-text {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.modal-text + .modal-text {
+  margin-top: 10px;
+}
+
+.modal-text--warning {
+  color: #ffd0c4;
+}
+
+.modal-actions {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .artist-list,
 .songs-list {
   margin-top: 14px;

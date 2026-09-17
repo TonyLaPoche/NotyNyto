@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { ArtistCatalog, Track } from './domain/entities/track'
-import { DEMO_ARTIST_HANDLE } from './domain/entities/track'
+import type {
+  ArtistCatalog,
+  LocalPlaylist,
+  Track,
+  TrackAvailabilityFilter,
+} from './domain/entities/track'
+import {
+  BULK_DOWNLOAD_WARNING_THRESHOLD,
+  DEMO_ARTIST_HANDLE,
+  ESTIMATED_MB_PER_TRACK,
+} from './domain/entities/track'
 import {
   getArtistCatalog,
   listArtistCatalogs,
@@ -18,8 +27,25 @@ import {
 } from './application/usecases/offlineAudioCache'
 import { canDownloadForOffline, readBrowserNetworkQuality } from './application/usecases/networkGate'
 import { shareTrack } from './application/usecases/shareTrack'
+import {
+  addTrackToPlaylist,
+  createPlaylist,
+  deletePlaylist,
+  getPlaylist,
+  listPlaylists,
+  removeTrackFromPlaylist,
+  renamePlaylist,
+} from './application/usecases/localPlaylists'
+import { readPlayerPrefs, setSkipBulkDownloadWarning } from './application/usecases/playerPrefs'
+import {
+  estimateDownloadMegabytes,
+  filterTracksByAvailability,
+  pickNextShuffledIndex,
+  shuffleTracks,
+} from './application/usecases/playbackQueue'
 
-type Page = 'home' | 'library' | 'artist'
+type Page = 'home' | 'library' | 'artist' | 'playlist'
+type LibraryTab = 'artists' | 'tracks' | 'playlists'
 type RepeatMode = 'off' | 'all' | 'one'
 
 interface DownloadProgress {
@@ -31,9 +57,13 @@ interface DownloadProgress {
 
 function App() {
   const [page, setPage] = useState<Page>('home')
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>('artists')
   const [query, setQuery] = useState('')
   const [library, setLibrary] = useState<ArtistCatalog[]>(() => listArtistCatalogs())
+  const [playlists, setPlaylists] = useState<LocalPlaylist[]>(() => listPlaylists())
   const [activeCatalog, setActiveCatalog] = useState<ArtistCatalog | null>(null)
+  const [activePlaylist, setActivePlaylist] = useState<LocalPlaylist | null>(null)
+  const [playQueue, setPlayQueue] = useState<Track[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
@@ -43,6 +73,7 @@ function App() {
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(0.85)
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('off')
+  const [shuffleEnabled, setShuffleEnabled] = useState(false)
   const [activeTrackId, setActiveTrackId] = useState<string | null>(null)
   const [playableUrl, setPlayableUrl] = useState<string | null>(null)
   const [cachedIds, setCachedIds] = useState<string[]>([])
@@ -51,17 +82,47 @@ function App() {
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const [trackDownloadPercent, setTrackDownloadPercent] = useState<Record<string, number>>({})
   const [networkQuality, setNetworkQuality] = useState(() => readBrowserNetworkQuality())
+  const [artistFilter, setArtistFilter] = useState<TrackAvailabilityFilter>('all')
+  const [libraryTrackFilter, setLibraryTrackFilter] = useState<TrackAvailabilityFilter>('all')
+  const [playlistNameDraft, setPlaylistNameDraft] = useState('')
+  const [playlistPickerTrack, setPlaylistPickerTrack] = useState<Track | null>(null)
+  const [bulkWarningOpen, setBulkWarningOpen] = useState(false)
+  const [bulkWarningDontAsk, setBulkWarningDontAsk] = useState(false)
+  const [skipBulkWarning, setSkipBulkWarning] = useState(
+    () => readPlayerPrefs().skipBulkDownloadWarning,
+  )
 
   const installPromptRef = useRef<BeforeInstallPromptEvent | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const objectUrlRef = useRef<string | null>(null)
   const shouldAutoplayRef = useRef(false)
 
-  const tracks = useMemo(() => activeCatalog?.tracks ?? [], [activeCatalog])
-  const activeTrack = tracks.find((track) => track.id === activeTrackId) ?? tracks[0] ?? null
-  const currentTrackIndex = activeTrack ? tracks.findIndex((track) => track.id === activeTrack.id) : -1
-  const cachedCount = tracks.filter((track) => cachedIds.includes(track.id)).length
-  const installPercent = tracks.length ? Math.round((cachedCount / tracks.length) * 100) : 0
+  const activeTrack = playQueue.find((track) => track.id === activeTrackId) ?? playQueue[0] ?? null
+  const currentTrackIndex = activeTrack ? playQueue.findIndex((track) => track.id === activeTrack.id) : -1
+  const inLibrary = Boolean(
+    activeCatalog && library.some((entry) => entry.artist.handle === activeCatalog.artist.handle),
+  )
+  const libraryTracks = useMemo(() => library.flatMap((entry) => entry.tracks), [library])
+  const localLibraryTracks = useMemo(
+    () => filterTracksByAvailability(libraryTracks, cachedIds, 'local'),
+    [libraryTracks, cachedIds],
+  )
+  const filteredArtistTracks = useMemo(
+    () => filterTracksByAvailability(activeCatalog?.tracks ?? [], cachedIds, artistFilter),
+    [activeCatalog, cachedIds, artistFilter],
+  )
+  const filteredLibraryTracks = useMemo(
+    () => filterTracksByAvailability(libraryTracks, cachedIds, libraryTrackFilter),
+    [libraryTracks, cachedIds, libraryTrackFilter],
+  )
+  const cachedCount = (activeCatalog?.tracks ?? []).filter((track) => cachedIds.includes(track.id)).length
+  const installPercent = activeCatalog?.tracks.length
+    ? Math.round((cachedCount / activeCatalog.tracks.length) * 100)
+    : 0
+  const pendingDownloadCount = (activeCatalog?.tracks ?? []).filter(
+    (track) => !cachedIds.includes(track.id),
+  ).length
+  const estimatedBulkMb = estimateDownloadMegabytes(pendingDownloadCount, ESTIMATED_MB_PER_TRACK)
 
   const appStyle = useMemo(
     () => ({ '--play-progress': duration ? String(currentTime / duration) : '0' }) as CSSProperties,
@@ -87,7 +148,19 @@ function App() {
         const existing = getArtistCatalog(handle)
         if (existing) {
           setActiveCatalog(existing)
+          setPlayQueue(existing.tracks)
           setActiveTrackId((previous) => previous ?? existing.tracks[0]?.id ?? null)
+        }
+        return
+      }
+      if (hash.startsWith('/playlist/')) {
+        const id = hash.replace('/playlist/', '').split('/')[0]
+        const playlist = getPlaylist(id)
+        setPage('playlist')
+        if (playlist) {
+          setActivePlaylist(playlist)
+          setPlayQueue(playlist.tracks)
+          setActiveTrackId((previous) => previous ?? playlist.tracks[0]?.id ?? null)
         }
         return
       }
@@ -163,45 +236,9 @@ function App() {
       .then(() => setIsPlaying(true))
       .catch(() => {
         setIsPlaying(false)
-        setError('Lecture bloquee par le navigateur. Reessaie via PLAY.')
+        setError('Lecture bloquee par le navigateur. Reessaie via Lecture.')
       })
   }, [playableUrl, activeTrackId])
-
-  useEffect(() => {
-    const bootstrap = async () => {
-      const existing = getArtistCatalog(DEMO_ARTIST_HANDLE)
-      if (existing) {
-        setLibrary(listArtistCatalogs())
-        if (!activeCatalog) {
-          setActiveCatalog(existing)
-          setActiveTrackId(existing.tracks[0]?.id ?? null)
-        }
-        return
-      }
-
-      if (!navigator.onLine) {
-        setError('Hors ligne: ajoute un artiste quand le reseau revient.')
-        return
-      }
-
-      setIsLoading(true)
-      try {
-        const catalog = await fetchPublicArtistCatalog(DEMO_ARTIST_HANDLE)
-        const nextLibrary = saveArtistCatalog(catalog)
-        setLibrary(nextLibrary)
-        setActiveCatalog(catalog)
-        setActiveTrackId(catalog.tracks[0]?.id ?? null)
-        setStatusMessage(`Demo prete: @${catalog.artist.handle}`)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Impossible de charger la demo')
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    void bootstrap()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   /* c8 ignore start -- Media Session API absente en tests */
   useEffect(() => {
@@ -224,20 +261,8 @@ function App() {
     navigator.mediaSession.setActionHandler('pause', () => {
       audio.pause()
     })
-    navigator.mediaSession.setActionHandler('previoustrack', () => {
-      if (!tracks.length || currentTrackIndex < 0) return
-      const nextIndex = (currentTrackIndex - 1 + tracks.length) % tracks.length
-      shouldAutoplayRef.current = true
-      setActiveTrackId(tracks[nextIndex].id)
-      setIsLyricsExpanded(false)
-    })
-    navigator.mediaSession.setActionHandler('nexttrack', () => {
-      if (!tracks.length || currentTrackIndex < 0) return
-      const nextIndex = (currentTrackIndex + 1) % tracks.length
-      shouldAutoplayRef.current = true
-      setActiveTrackId(tracks[nextIndex].id)
-      setIsLyricsExpanded(false)
-    })
+    navigator.mediaSession.setActionHandler('previoustrack', () => goToRelativeTrack(-1, true))
+    navigator.mediaSession.setActionHandler('nexttrack', () => goToRelativeTrack(1, true))
     navigator.mediaSession.setActionHandler('seekto', (details) => {
       if (typeof details.seekTime === 'number') {
         const bounded = Math.min(Math.max(details.seekTime, 0), duration || 0)
@@ -252,7 +277,7 @@ function App() {
         position: Math.min(currentTime, duration),
       })
     }
-  }, [activeTrack, isPlaying, currentTime, duration, tracks, currentTrackIndex])
+  }, [activeTrack, isPlaying, currentTime, duration, playQueue, currentTrackIndex, shuffleEnabled])
   /* c8 ignore end */
 
   async function refreshCacheState() {
@@ -262,19 +287,40 @@ function App() {
     setCacheBytes(bytes)
   }
 
+  function startQueue(tracks: Track[], track?: Track, autoplay = false, shuffled = shuffleEnabled) {
+    if (!tracks.length) {
+      setError('Aucune piste disponible pour cette lecture.')
+      return
+    }
+    const queue = shuffled ? shuffleTracks(tracks) : tracks
+    const selected = track && queue.some((item) => item.id === track.id) ? track : queue[0]
+    setPlayQueue(queue)
+    shouldAutoplayRef.current = autoplay
+    setActiveTrackId(selected.id)
+    setIsLyricsExpanded(false)
+    setError(null)
+  }
+
   async function handleScanArtist(rawInput: string) {
     setError(null)
     setStatusMessage(null)
     setIsLoading(true)
     try {
       const catalog = await fetchPublicArtistCatalog(rawInput)
-      const nextLibrary = saveArtistCatalog(catalog)
-      setLibrary(nextLibrary)
+      const alreadySaved = Boolean(getArtistCatalog(catalog.artist.handle))
+      if (alreadySaved) {
+        setLibrary(saveArtistCatalog(catalog))
+      }
       setActiveCatalog(catalog)
-      setActiveTrackId(catalog.tracks[0]?.id ?? null)
+      setArtistFilter('all')
+      startQueue(catalog.tracks, catalog.tracks[0], false, false)
       setPage('artist')
       window.location.hash = `/artist/${catalog.artist.handle}`
-      setStatusMessage(`${catalog.tracks.length} sons pour @${catalog.artist.handle}`)
+      setStatusMessage(
+        alreadySaved
+          ? `${catalog.tracks.length} sons · deja dans ta bibliotheque`
+          : `${catalog.tracks.length} sons · ajoute-le a la bibliotheque si tu veux le garder`,
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Scan impossible')
     } finally {
@@ -282,24 +328,80 @@ function App() {
     }
   }
 
+  function addActiveArtistToLibrary() {
+    if (!activeCatalog) return
+    const next = saveArtistCatalog(activeCatalog)
+    setLibrary(next)
+    setStatusMessage(`@${activeCatalog.artist.handle} ajoute a la bibliotheque`)
+  }
+
   function openArtist(catalog: ArtistCatalog) {
     setActiveCatalog(catalog)
-    setActiveTrackId(catalog.tracks[0]?.id ?? null)
+    setArtistFilter('all')
+    startQueue(catalog.tracks, catalog.tracks[0], false, false)
     setPage('artist')
     window.location.hash = `/artist/${catalog.artist.handle}`
+  }
+
+  function openPlaylist(playlist: LocalPlaylist) {
+    setActivePlaylist(playlist)
+    startQueue(playlist.tracks, playlist.tracks[0], false, false)
+    setPage('playlist')
+    window.location.hash = `/playlist/${playlist.id}`
   }
 
   function deleteArtist(handle: string) {
     const next = removeArtistCatalog(handle)
     setLibrary(next)
     if (activeCatalog?.artist.handle === handle) {
-      setActiveCatalog(next[0] ?? null)
-      setActiveTrackId(next[0]?.tracks[0]?.id ?? null)
-      if (!next[0]) {
-        setPage('home')
-        window.location.hash = '#/'
-      }
+      setActiveCatalog(null)
+      setPage('library')
+      window.location.hash = '#/library'
     }
+  }
+
+  function handleCreatePlaylist() {
+    const next = createPlaylist(playlistNameDraft || 'Nouvelle playlist')
+    setPlaylists(next)
+    setPlaylistNameDraft('')
+    setStatusMessage('Playlist creee')
+    setLibraryTab('playlists')
+  }
+
+  function handleRenamePlaylist(id: string) {
+    const name = window.prompt('Nouveau nom de playlist')
+    if (!name) return
+    setPlaylists(renamePlaylist(id, name))
+  }
+
+  function handleDeletePlaylist(id: string) {
+    const next = deletePlaylist(id)
+    setPlaylists(next)
+    if (activePlaylist?.id === id) {
+      setActivePlaylist(null)
+      setPage('library')
+      window.location.hash = '#/library'
+    }
+  }
+
+  function handleAddTrackToPlaylist(playlistId: string, track: Track) {
+    const next = addTrackToPlaylist(playlistId, track)
+    setPlaylists(next)
+    if (activePlaylist?.id === playlistId) {
+      const updated = next.find((item) => item.id === playlistId) ?? null
+      setActivePlaylist(updated)
+    }
+    setPlaylistPickerTrack(null)
+    setStatusMessage('Titre ajoute a la playlist')
+  }
+
+  function handleRemoveFromPlaylist(trackId: string) {
+    if (!activePlaylist) return
+    const next = removeTrackFromPlaylist(activePlaylist.id, trackId)
+    setPlaylists(next)
+    const updated = next.find((item) => item.id === activePlaylist.id) ?? null
+    setActivePlaylist(updated)
+    if (updated) setPlayQueue(updated.tracks)
   }
 
   const handleInstall = async () => {
@@ -340,21 +442,37 @@ function App() {
     setCurrentTime(nextValue)
   }
 
-  const selectTrack = (track: Track, autoplay = false) => {
-    shouldAutoplayRef.current = autoplay
-    setActiveTrackId(track.id)
-    setIsLyricsExpanded(false)
-    setError(null)
+  const selectTrack = (track: Track, queue: Track[], autoplay = false) => {
+    startQueue(queue, track, autoplay, false)
   }
 
   const goToRelativeTrack = (delta: number, autoplay = isPlaying) => {
-    if (!tracks.length || currentTrackIndex < 0) return
-    const nextIndex = (currentTrackIndex + delta + tracks.length) % tracks.length
-    selectTrack(tracks[nextIndex], autoplay)
+    if (!playQueue.length || currentTrackIndex < 0) return
+    if (shuffleEnabled) {
+      const nextIndex = pickNextShuffledIndex(playQueue.length, currentTrackIndex)
+      shouldAutoplayRef.current = autoplay
+      setActiveTrackId(playQueue[nextIndex].id)
+      setIsLyricsExpanded(false)
+      return
+    }
+    const nextIndex = (currentTrackIndex + delta + playQueue.length) % playQueue.length
+    shouldAutoplayRef.current = autoplay
+    setActiveTrackId(playQueue[nextIndex].id)
+    setIsLyricsExpanded(false)
   }
 
   const cycleRepeatMode = () => {
     setRepeatMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'))
+  }
+
+  const startShuffle = (tracks: Track[], label: string) => {
+    if (!tracks.length) {
+      setError(`Aucun titre pour ${label}.`)
+      return
+    }
+    setShuffleEnabled(true)
+    startQueue(tracks, undefined, true, true)
+    setStatusMessage(`Aleatoire: ${tracks.length} titres (${label})`)
   }
 
   const downloadTrack = async (track: Track) => {
@@ -384,17 +502,37 @@ function App() {
     }
   }
 
-  const downloadAll = async () => {
+  const requestDownloadAll = () => {
     if (!activeCatalog) return
     if (!canDownloadForOffline(networkQuality)) {
       setError('Reseau insuffisant pour tout telecharger.')
       return
     }
-    const pending = activeCatalog.tracks.filter((track) => !cachedIds.includes(track.id))
-    if (pending.length === 0) {
+    if (pendingDownloadCount === 0) {
       setStatusMessage('Deja installe a 100% en local')
       return
     }
+    if (pendingDownloadCount > BULK_DOWNLOAD_WARNING_THRESHOLD && !skipBulkWarning) {
+      setBulkWarningDontAsk(false)
+      setBulkWarningOpen(true)
+      return
+    }
+    void runDownloadAll()
+  }
+
+  const confirmBulkDownload = () => {
+    if (bulkWarningDontAsk) {
+      setSkipBulkDownloadWarning(true)
+      setSkipBulkWarning(true)
+    }
+    setBulkWarningOpen(false)
+    void runDownloadAll()
+  }
+
+  const runDownloadAll = async () => {
+    if (!activeCatalog) return
+    const pending = activeCatalog.tracks.filter((track) => !cachedIds.includes(track.id))
+    if (pending.length === 0) return
 
     setDownloadProgress({ label: pending[0].title, percent: 0, current: 0, total: pending.length })
     try {
@@ -445,21 +583,26 @@ function App() {
     setStatusMessage('Cache audio vide')
   }
 
+  const pageTitle =
+    page === 'home'
+      ? null
+      : page === 'library'
+        ? 'Bibliotheque'
+        : page === 'playlist'
+          ? activePlaylist?.name ?? 'Playlist'
+          : activeCatalog?.artist.displayName ?? 'Artiste'
+
   return (
     <main className={`app ${isPlaying ? 'app--playing' : ''}`} style={appStyle}>
       <div className="atmosphere" aria-hidden />
 
       <nav className="site-nav" aria-label="Navigation principale">
-        <a
-          href="#/"
-          className={`nav-link ${page === 'home' ? 'nav-link--active' : ''}`}
-          onClick={() => setPage('home')}
-        >
+        <a href="#/" className={`nav-link ${page === 'home' ? 'nav-link--active' : ''}`} onClick={() => setPage('home')}>
           Accueil
         </a>
         <a
           href="#/library"
-          className={`nav-link ${page === 'library' ? 'nav-link--active' : ''}`}
+          className={`nav-link ${page === 'library' || page === 'playlist' ? 'nav-link--active' : ''}`}
           onClick={() => setPage('library')}
         >
           Bibliotheque
@@ -472,16 +615,10 @@ function App() {
           {page === 'home' ? (
             <>
               <h1>Ecoute publique, cache local</h1>
-              <p className="subtitle">Scanne un profil Suno, joue, puis installe hors ligne.</p>
+              <p className="subtitle">Scanne, ecoute, puis ajoute seulement ce que tu veux garder.</p>
             </>
           ) : (
-            <h1 className="topbar-title">
-              {page === 'library'
-                ? 'Bibliotheque'
-                : activeCatalog
-                  ? activeCatalog.artist.displayName
-                  : 'Artiste'}
-            </h1>
+            <h1 className="topbar-title">{pageTitle}</h1>
           )}
         </div>
 
@@ -535,7 +672,13 @@ function App() {
                 {downloadProgress.current}/{downloadProgress.total} · {downloadProgress.label}
               </span>
             </div>
-            <div className="progress-bar" role="progressbar" aria-valuenow={downloadProgress.percent} aria-valuemin={0} aria-valuemax={100}>
+            <div
+              className="progress-bar"
+              role="progressbar"
+              aria-valuenow={downloadProgress.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
               <div className="progress-bar__fill" style={{ width: `${downloadProgress.percent}%` }} />
             </div>
           </div>
@@ -546,7 +689,7 @@ function App() {
         <section className="panel" aria-label="Demarrer">
           <h2 className="section-title">Demarrer</h2>
           <p className="section-subtitle">
-            Exemple: <code>@{DEMO_ARTIST_HANDLE}</code> ou une URL <code>suno.com/@…</code>
+            Un scan ouvre l&apos;artiste sans l&apos;ajouter a ta bibliotheque. Tu decides ensuite.
           </p>
           <div className="home-actions">
             <button
@@ -554,17 +697,17 @@ function App() {
               className="btn btn--primary"
               onClick={() => void handleScanArtist(DEMO_ARTIST_HANDLE)}
             >
-              Charger @{DEMO_ARTIST_HANDLE}
+              Essayer @{DEMO_ARTIST_HANDLE}
             </button>
-            {library[0] && (
-              <button type="button" className="btn" onClick={() => openArtist(library[0])}>
-                Continuer avec {library[0].artist.displayName}
-              </button>
-            )}
+            <button type="button" className="btn" onClick={() => {
+              setPage('library')
+              window.location.hash = '#/library'
+            }}>
+              Ouvrir la bibliotheque
+            </button>
           </div>
-
           {library.length > 0 && (
-            <div className="quick-artists" aria-label="Artistes recents">
+            <div className="quick-artists" aria-label="Artistes de ta bibliotheque">
               {library.slice(0, 4).map((catalog) => (
                 <button key={catalog.artist.handle} type="button" className="chip" onClick={() => openArtist(catalog)}>
                   @{catalog.artist.handle}
@@ -577,30 +720,132 @@ function App() {
 
       {page === 'library' && (
         <section className="panel" aria-label="Bibliotheque locale">
-          <p className="section-subtitle">Artistes scannes conserves sur cet appareil.</p>
-          <div className="artist-list">
-            {library.length === 0 && <p>Aucun artiste pour le moment.</p>}
-            {library.map((catalog) => (
-              <article key={catalog.artist.handle} className="artist-card">
-                <button type="button" className="artist-card__main" onClick={() => openArtist(catalog)}>
-                  {catalog.artist.avatarUrl ? (
-                    <img src={catalog.artist.avatarUrl} alt="" />
-                  ) : (
-                    <div className="avatar-fallback" aria-hidden />
-                  )}
-                  <div>
-                    <strong>{catalog.artist.displayName}</strong>
-                    <small>
-                      @{catalog.artist.handle} · {catalog.tracks.length} sons
-                    </small>
-                  </div>
-                </button>
-                <button type="button" className="btn" onClick={() => deleteArtist(catalog.artist.handle)}>
-                  Retirer
-                </button>
-              </article>
-            ))}
+          <div className="segmented" role="tablist" aria-label="Sections bibliotheque">
+            <button type="button" className={libraryTab === 'artists' ? 'segmented--active' : ''} onClick={() => setLibraryTab('artists')}>
+              Artistes
+            </button>
+            <button type="button" className={libraryTab === 'tracks' ? 'segmented--active' : ''} onClick={() => setLibraryTab('tracks')}>
+              Sons
+            </button>
+            <button type="button" className={libraryTab === 'playlists' ? 'segmented--active' : ''} onClick={() => setLibraryTab('playlists')}>
+              Playlists
+            </button>
           </div>
+
+          <div className="home-actions">
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => startShuffle(localLibraryTracks, 'telecharges')}
+            >
+              Aleatoire · locaux ({localLibraryTracks.length})
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => startShuffle(libraryTracks, 'bibliotheque')}
+            >
+              Aleatoire · bibliotheque ({libraryTracks.length})
+            </button>
+          </div>
+
+          {libraryTab === 'artists' && (
+            <>
+              <p className="section-subtitle">Seuls les artistes que tu as ajoutes manuellement.</p>
+              <div className="artist-list">
+                {library.length === 0 && <p>Aucun artiste sauvegarde. Scanne puis clique &quot;Ajouter a la bibliotheque&quot;.</p>}
+                {library.map((catalog) => {
+                  const localCount = catalog.tracks.filter((track) => cachedIds.includes(track.id)).length
+                  return (
+                    <article key={catalog.artist.handle} className="artist-card">
+                      <button type="button" className="artist-card__main" onClick={() => openArtist(catalog)}>
+                        {catalog.artist.avatarUrl ? (
+                          <img src={catalog.artist.avatarUrl} alt="" />
+                        ) : (
+                          <div className="avatar-fallback" aria-hidden />
+                        )}
+                        <div>
+                          <strong>{catalog.artist.displayName}</strong>
+                          <small>
+                            @{catalog.artist.handle} · {localCount}/{catalog.tracks.length} locaux
+                          </small>
+                        </div>
+                      </button>
+                      <button type="button" className="btn" onClick={() => deleteArtist(catalog.artist.handle)}>
+                        Retirer
+                      </button>
+                    </article>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {libraryTab === 'tracks' && (
+            <>
+              <FilterChips value={libraryTrackFilter} onChange={setLibraryTrackFilter} />
+              <div className="songs-list">
+                {filteredLibraryTracks.length === 0 && <p>Aucun titre pour ce filtre.</p>}
+                {filteredLibraryTracks.map((track, index) => (
+                  <TrackRow
+                    key={`${track.id}-${index}`}
+                    track={track}
+                    index={index}
+                    active={track.id === activeTrack?.id}
+                    cached={cachedIds.includes(track.id)}
+                    percent={trackDownloadPercent[track.id]}
+                    onPlay={() => selectTrack(track, filteredLibraryTracks, true)}
+                    onDownload={() => void downloadTrack(track)}
+                    onAddToPlaylist={() => setPlaylistPickerTrack(track)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+
+          {libraryTab === 'playlists' && (
+            <>
+              <form
+                className="playlist-create"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  handleCreatePlaylist()
+                }}
+              >
+                <input
+                  value={playlistNameDraft}
+                  onChange={(event) => setPlaylistNameDraft(event.target.value)}
+                  placeholder="Nom de la playlist"
+                  aria-label="Nom de la playlist"
+                />
+                <button type="submit" className="btn btn--primary">
+                  Creer
+                </button>
+              </form>
+              <div className="artist-list">
+                {playlists.length === 0 && <p>Aucune playlist. Cree-en une, puis ajoute des titres depuis un artiste.</p>}
+                {playlists.map((playlist) => (
+                  <article key={playlist.id} className="artist-card">
+                    <button type="button" className="artist-card__main" onClick={() => openPlaylist(playlist)}>
+                      <div className="avatar-fallback" aria-hidden />
+                      <div>
+                        <strong>{playlist.name}</strong>
+                        <small>{playlist.tracks.length} titres</small>
+                      </div>
+                    </button>
+                    <div className="row-actions">
+                      <button type="button" className="btn" onClick={() => handleRenamePlaylist(playlist.id)}>
+                        Renommer
+                      </button>
+                      <button type="button" className="btn" onClick={() => handleDeletePlaylist(playlist.id)}>
+                        Supprimer
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
         </section>
       )}
 
@@ -623,45 +868,75 @@ function App() {
                 Profil Suno
               </a>
             </div>
-            <button type="button" className="btn btn--primary" onClick={() => void downloadAll()} disabled={Boolean(downloadProgress)}>
-              Installer local ({installPercent}%)
-            </button>
+            <div className="artist-header__actions">
+              {!inLibrary ? (
+                <button type="button" className="btn btn--primary" onClick={addActiveArtistToLibrary}>
+                  Ajouter a la bibliotheque
+                </button>
+              ) : (
+                <span className="cache-pill cache-pill--progress">Dans la bibliotheque</span>
+              )}
+              <button
+                type="button"
+                className="btn"
+                onClick={requestDownloadAll}
+                disabled={Boolean(downloadProgress)}
+              >
+                Installer local ({installPercent}%)
+              </button>
+            </div>
           </div>
 
+          <FilterChips value={artistFilter} onChange={setArtistFilter} />
+
           <div className="songs-list">
-            {activeCatalog.tracks.map((track, index) => {
-              const percent = trackDownloadPercent[track.id]
-              const isCached = cachedIds.includes(track.id)
-              return (
-                <div
-                  key={track.id}
-                  className={`song-row ${track.id === activeTrack?.id ? 'song-row--active' : ''}`}
-                >
-                  <button type="button" className="song-row__main" onClick={() => selectTrack(track, true)}>
-                    <span className="song-rank">#{index + 1}</span>
-                    <span className="song-title">{track.title}</span>
-                    <span className="song-artist">
-                      {formatTime(track.duration)}
-                      {isCached ? ' · local' : percent != null ? ` · ${percent}%` : ''}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="song-cache-btn"
-                    onClick={() => void downloadTrack(track)}
-                    disabled={isCached || percent != null}
-                    aria-label={isCached ? `${track.title} deja local` : `Telecharger ${track.title}`}
-                  >
-                    {isCached ? 'OK' : percent != null ? `${percent}%` : '↓'}
-                  </button>
-                  {percent != null && (
-                    <div className="song-row__progress" aria-hidden>
-                      <div style={{ width: `${percent}%` }} />
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+            {filteredArtistTracks.length === 0 && <p>Aucun titre pour ce filtre.</p>}
+            {filteredArtistTracks.map((track, index) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                index={index}
+                active={track.id === activeTrack?.id}
+                cached={cachedIds.includes(track.id)}
+                percent={trackDownloadPercent[track.id]}
+                onPlay={() => selectTrack(track, filteredArtistTracks, true)}
+                onDownload={() => void downloadTrack(track)}
+                onAddToPlaylist={() => setPlaylistPickerTrack(track)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {page === 'playlist' && activePlaylist && (
+        <section className="panel" aria-label={`Playlist ${activePlaylist.name}`}>
+          <div className="artist-header">
+            <div className="artist-header__copy">
+              <p className="section-subtitle">{activePlaylist.tracks.length} titres locaux a cette playlist</p>
+            </div>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => startShuffle(activePlaylist.tracks, activePlaylist.name)}
+            >
+              Aleatoire
+            </button>
+          </div>
+          <div className="songs-list">
+            {activePlaylist.tracks.length === 0 && <p>Playlist vide.</p>}
+            {activePlaylist.tracks.map((track, index) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                index={index}
+                active={track.id === activeTrack?.id}
+                cached={cachedIds.includes(track.id)}
+                percent={trackDownloadPercent[track.id]}
+                onPlay={() => selectTrack(track, activePlaylist.tracks, true)}
+                onDownload={() => void downloadTrack(track)}
+                onRemove={() => handleRemoveFromPlaylist(track.id)}
+              />
+            ))}
           </div>
         </section>
       )}
@@ -674,17 +949,32 @@ function App() {
             <small>
               {activeTrack.artist} · {formatTime(currentTime)} / {formatTime(duration)}
               {cachedIds.includes(activeTrack.id) ? ' · local' : ''}
+              {shuffleEnabled ? ' · aleatoire' : ''}
             </small>
           </div>
           <div className="player-bar__controls">
             <button type="button" aria-label="Piste precedente" onClick={() => goToRelativeTrack(-1)}>
               ◁
             </button>
-            <button type="button" className="player-bar__play" aria-label={isPlaying ? 'Pause' : 'Lecture'} onClick={() => void handlePlayPause()}>
+            <button
+              type="button"
+              className="player-bar__play"
+              aria-label={isPlaying ? 'Pause' : 'Lecture'}
+              onClick={() => void handlePlayPause()}
+            >
               {isPlaying ? '❚❚' : '▷'}
             </button>
             <button type="button" aria-label="Piste suivante" onClick={() => goToRelativeTrack(1)}>
               ▷
+            </button>
+            <button
+              type="button"
+              className={shuffleEnabled ? 'repeat-btn--active' : ''}
+              aria-label="Lecture aleatoire"
+              aria-pressed={shuffleEnabled}
+              onClick={() => setShuffleEnabled((value) => !value)}
+            >
+              ↝
             </button>
             <button
               type="button"
@@ -717,10 +1007,13 @@ function App() {
                 aria-label="Volume"
               />
             </label>
+            <button type="button" className="btn" onClick={() => setPlaylistPickerTrack(activeTrack)}>
+              + Playlist
+            </button>
             <button type="button" className="btn" onClick={() => void shareTrack(activeTrack)}>
               Partager
             </button>
-            <button type="button" className="btn" onClick={() => setIsLyricsExpanded((v) => !v)}>
+            <button type="button" className="btn" onClick={() => setIsLyricsExpanded((value) => !value)}>
               {isLyricsExpanded ? 'Masquer lyrics' : 'Lyrics'}
             </button>
             <a className="btn" href={activeTrack.sunoUrl} target="_blank" rel="noreferrer">
@@ -750,7 +1043,7 @@ function App() {
                 }
                 return
               }
-              if (repeatMode === 'all') {
+              if (repeatMode === 'all' || shuffleEnabled) {
                 goToRelativeTrack(1, true)
                 return
               }
@@ -760,7 +1053,172 @@ function App() {
           />
         </aside>
       )}
+
+      {bulkWarningOpen && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setBulkWarningOpen(false)}>
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirmation telechargement"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="modal-title">Telechargement volumineux</h3>
+            <p className="modal-text">
+              Tu t&apos;appretes a installer <strong>{pendingDownloadCount} sons</strong> (~{estimatedBulkMb} Mo
+              estimes). Sur telephone, ca peut saturer le stockage si tu n&apos;en ecoutes que quelques-uns.
+            </p>
+            <p className="modal-text modal-text--warning">
+              Conseil: telecharge d&apos;abord 3 ou 4 titres a l&apos;unite, ou filtre &quot;En ligne&quot; puis
+              choisis.
+            </p>
+            <label className="modal-check">
+              <input
+                type="checkbox"
+                checked={bulkWarningDontAsk}
+                onChange={(event) => setBulkWarningDontAsk(event.target.checked)}
+              />
+              Ne plus demander
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setBulkWarningOpen(false)}>
+                Annuler
+              </button>
+              <button type="button" className="btn btn--primary" onClick={confirmBulkDownload}>
+                Confirmer le telechargement
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {playlistPickerTrack && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setPlaylistPickerTrack(null)}>
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Ajouter a une playlist"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="modal-title">Ajouter a une playlist</h3>
+            <p className="modal-text">{playlistPickerTrack.title}</p>
+            {playlists.length === 0 ? (
+              <p className="modal-text">Aucune playlist. Cree-en une dans Bibliotheque → Playlists.</p>
+            ) : (
+              <div className="playlist-picker-list">
+                {playlists.map((playlist) => (
+                  <button
+                    key={playlist.id}
+                    type="button"
+                    className="btn"
+                    onClick={() => handleAddTrackToPlaylist(playlist.id, playlistPickerTrack)}
+                  >
+                    {playlist.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setPlaylistPickerTrack(null)}>
+                Fermer
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
+  )
+}
+
+function FilterChips({
+  value,
+  onChange,
+}: {
+  value: TrackAvailabilityFilter
+  onChange: (value: TrackAvailabilityFilter) => void
+}) {
+  return (
+    <div className="filter-chips" role="group" aria-label="Filtrer local ou en ligne">
+      <button type="button" className={value === 'all' ? 'chip chip--active' : 'chip'} onClick={() => onChange('all')}>
+        Tous
+      </button>
+      <button
+        type="button"
+        className={value === 'local' ? 'chip chip--active' : 'chip'}
+        onClick={() => onChange('local')}
+      >
+        Telecharges
+      </button>
+      <button
+        type="button"
+        className={value === 'online' ? 'chip chip--active' : 'chip'}
+        onClick={() => onChange('online')}
+      >
+        En ligne
+      </button>
+    </div>
+  )
+}
+
+function TrackRow({
+  track,
+  index,
+  active,
+  cached,
+  percent,
+  onPlay,
+  onDownload,
+  onAddToPlaylist,
+  onRemove,
+}: {
+  track: Track
+  index: number
+  active: boolean
+  cached: boolean
+  percent?: number
+  onPlay: () => void
+  onDownload: () => void
+  onAddToPlaylist?: () => void
+  onRemove?: () => void
+}) {
+  return (
+    <div className={`song-row ${active ? 'song-row--active' : ''}`}>
+      <button type="button" className="song-row__main" onClick={onPlay}>
+        <span className="song-rank">#{index + 1}</span>
+        <span className="song-title">{track.title}</span>
+        <span className="song-artist">
+          {track.artist} · {formatTime(track.duration)}
+          {cached ? ' · local' : percent != null ? ` · ${percent}%` : ''}
+        </span>
+      </button>
+      <div className="song-row__actions">
+        {onAddToPlaylist && (
+          <button type="button" className="song-cache-btn" onClick={onAddToPlaylist} aria-label={`Ajouter ${track.title} a une playlist`}>
+            +
+          </button>
+        )}
+        {onRemove && (
+          <button type="button" className="song-cache-btn" onClick={onRemove} aria-label={`Retirer ${track.title}`}>
+            ×
+          </button>
+        )}
+        <button
+          type="button"
+          className="song-cache-btn"
+          onClick={onDownload}
+          disabled={cached || percent != null}
+          aria-label={cached ? `${track.title} deja local` : `Telecharger ${track.title}`}
+        >
+          {cached ? 'OK' : percent != null ? `${percent}%` : '↓'}
+        </button>
+      </div>
+      {percent != null && (
+        <div className="song-row__progress" aria-hidden>
+          <div style={{ width: `${percent}%` }} />
+        </div>
+      )}
+    </div>
   )
 }
 

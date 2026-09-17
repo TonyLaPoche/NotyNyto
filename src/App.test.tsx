@@ -77,11 +77,14 @@ describe('App', () => {
     })
   })
 
-  it('charge la demo et permet de jouer un titre', async () => {
+  it('scanne sans ajouter automatiquement a la bibliotheque puis joue', async () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: 'Ecoute publique, cache local' })).toBeInTheDocument()
-    expect(await screen.findByText('Grande Soeur')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Essayer @noty2686' }))
+
+    expect(await screen.findByRole('button', { name: 'Ajouter a la bibliotheque' })).toBeInTheDocument()
+    expect(screen.getAllByText('Grande Soeur').length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: 'Lecture' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument())
@@ -90,21 +93,20 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Masquer lyrics' })).toBeInTheDocument()
   })
 
-  it('navigue bibliotheque et scanne un artiste', async () => {
+  it('ajoute a la bibliotheque sur decision utilisateur et cree une playlist', async () => {
     render(<App />)
-    await screen.findByText('Grande Soeur')
+    fireEvent.click(await screen.findByRole('button', { name: 'Essayer @noty2686' }))
+    await screen.findByRole('button', { name: 'Ajouter a la bibliotheque' })
+    fireEvent.click(screen.getByRole('button', { name: 'Ajouter a la bibliotheque' }))
 
     fireEvent.click(screen.getByRole('link', { name: 'Bibliotheque' }))
     fireEvent(window, new HashChangeEvent('hashchange'))
     expect(await screen.findByRole('heading', { name: 'Bibliotheque' })).toBeInTheDocument()
+    expect(screen.getByText('Noty')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('link', { name: 'Accueil' }))
-    fireEvent(window, new HashChangeEvent('hashchange'))
-
-    fireEvent.change(screen.getByLabelText('Chercher un artiste Suno'), {
-      target: { value: 'https://suno.com/@noty2686?page=songs' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Scanner' }))
-    await waitFor(() => expect(screen.getByText(/sons pour @noty2686/i)).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Playlists' }))
+    fireEvent.change(screen.getByLabelText('Nom de la playlist'), { target: { value: 'Soiree' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Creer' }))
+    expect(await screen.findByText('Soiree')).toBeInTheDocument()
   })
 })

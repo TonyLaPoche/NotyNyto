@@ -24,4 +24,16 @@ export interface ArtistCatalog {
   tracks: Track[]
 }
 
+export interface LocalPlaylist {
+  id: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  tracks: Track[]
+}
+
+export type TrackAvailabilityFilter = 'all' | 'local' | 'online'
+
 export const DEMO_ARTIST_HANDLE = 'noty2686'
+export const BULK_DOWNLOAD_WARNING_THRESHOLD = 10
+export const ESTIMATED_MB_PER_TRACK = 8
